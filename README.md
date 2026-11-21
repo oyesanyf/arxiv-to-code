@@ -66,8 +66,15 @@ cd arxiv-to-code
 pip install -e .
 ```
 
-### Run the 8-Step Automated Self-Test Suite & Pytest
+### Run the 8-Step Automated Self-Test Suite, `--help`, & Pytest
 ```powershell
+# Inspect full categorized CLI help documentation
+python cli.py --help
+
+# Inspect MCP server help & JSON catalog of all 8 MCP tools
+python mcp_server.py --help
+python mcp_server.py --list-tools
+
 # Run the 8-step end-to-end self-test suite
 python cli.py --test
 

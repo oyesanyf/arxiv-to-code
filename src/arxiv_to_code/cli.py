@@ -188,126 +188,201 @@ def run_self_test() -> bool:
     return True
 
 
+CLI_EPILOG = """
+================================================================================
+MODELFUSION DYNAROT DYNAMIC AVAILABLE MEMORY LAW (ANTI-OOM SIZING)
+================================================================================
+  Tier 1 (Free RAM >= 48 GB or Free VRAM >= 24 GB) : Primary qwen2.5:32b | Shinka Heavy qwen2.5:32b | OpenEvolve Fast qwen2.5:7b
+  Tier 2 (Free RAM >= 24 GB or Free VRAM >= 14 GB) : Primary qwen2.5:14b | Shinka Heavy qwen2.5:14b | OpenEvolve Fast qwen2.5:3b
+  Tier 3 (Free RAM >= 12 GB or Free VRAM >= 4.5 GB): Primary qwen2.5:7b  | Shinka Heavy qwen2.5:7b  | OpenEvolve Fast qwen2.5:1.5b
+  Tier 4 (Free RAM >= 6 GB  or Free VRAM >= 2 GB)  : Primary qwen2.5:3b  | Shinka Heavy qwen2.5:3b  | OpenEvolve Fast qwen2.5:1.5b
+  Tier 5 (Free RAM <  6 GB  and Free VRAM < 2 GB)  : Primary qwen2.5:1.5b| Shinka Heavy qwen2.5:1.5b| OpenEvolve Fast qwen2.5:0.5b
+
+================================================================================
+COMBINED SHINKAEVOLVE + OPENEVOLVE PAIRING MODES (--evolve / --evolves)
+================================================================================
+  * sequential : Stage 1 ShinkaEvolve (UCB1 bandit routing, Meta-Scratchpad, AST Novelty Rejection)
+                 discovers structural algorithmic breakthroughs and seeds its top elites into
+                 Stage 2 OpenEvolve (Multi-Island 2D MAP-Elites grid trading off memory vs speed).
+  * parallel   : Cross-pollinating ensemble running ShinkaEvolve (heavy reasoning tier) and
+                 OpenEvolve (fast lightweight mutation tier) concurrently over a shared filesystem
+                 elites directory (--elites-dir).
+  * hybrid     : Executes the two-stage sequential discovery-to-MAP-Elites pipeline followed by
+                 a parallel cross-pollinating ensemble pass (Default).
+
+================================================================================
+EXECUTABLE CLI EXAMPLES
+================================================================================
+  # 1. Run 8-step automated end-to-end self-test suite
+  python cli.py --test
+
+  # 2. Probe live RAM/VRAM, Pareto knee-point model, and Shinka/OpenEvolve compute split
+  python cli.py --dynarot
+
+  # 3. Auto-install/pull optimal Ollama models based on live available RAM & VRAM
+  python cli.py --install-models
+
+  # 4. Search arXiv, extract 3-class Google LangExtract spans, and synthesize Python code
+  python cli.py --query "LLM container sandbox escape" --max-results 3 --output-dir ./generated
+
+  # 5. Synthesize Python code for arXiv:2608.15888 and evolve with ShinkaEvolve + OpenEvolve
+  python cli.py --arxiv-id 2608.15888 --evolves --evolve-mode hybrid --output-dir ./generated
+
+  # 6. Extract a local PDF/LaTeX/Markdown document and write interactive LangExtract HTML
+  python cli.py --extract-doc ./paper.pdf --html-report ./audit.html --evolves
+
+  # 7. Run 4-Arm HMAC-SHA256 signed LangGraph Research & Evolutionary Swarm
+  python cli.py --arxiv-id 2603.02277 --langgraph
+
+  # 8. Launch Universal MCP Server over stdio JSON-RPC (8 tools)
+  python cli.py --mcp
+"""
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="arxiv-to-code",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
-            "ArXiv-to-Code CLI & MCP Server: Search arXiv, extract grounded spans via Google LangExtract, "
-            "synthesize production Python code, route/install models via ModelFusion DynaRot, and evolve "
-            "code using ShinkaEvolve + OpenEvolve."
+            "ArXiv-to-Code CLI & Universal MCP Server (v1.0.0)\n"
+            "--------------------------------------------------------------------------------\n"
+            "Autonomous arXiv Research Discovery, Google LangExtract 3-Class Source Grounding,\n"
+            "Zero-Mock Paper-to-Python Code Synthesis (# EVOLVE-BLOCK Convention), ModelFusion\n"
+            "DynaRot Hardware-Aware Model Routing, and Combined ShinkaEvolve + OpenEvolve\n"
+            "Evolutionary Optimization."
         ),
+        epilog=CLI_EPILOG,
     )
     parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version="arxiv-to-code 1.0.0",
+        help="Show program's version number and exit",
+    )
+
+    g_search = parser.add_argument_group("1. arXiv Discovery & Multi-Factor Ranking (0-100 Score)")
+    g_search.add_argument(
         "--query",
         "--search",
         dest="query",
         type=str,
         default="LLM agent sandbox escape breakout",
-        help="Search query for arXiv papers",
+        help="Search query for discovering and ranking arXiv papers (default: 'LLM agent sandbox escape breakout')",
     )
-    parser.add_argument(
+    g_search.add_argument(
         "--arxiv-id",
         type=str,
         default=None,
-        help="Specific arXiv paper ID to extract and synthesize (e.g., 2603.02277, 2608.15888)",
+        help="Specific arXiv paper ID to fetch, ground, and synthesize into Python (e.g., 2603.02277, 2608.15888, 2609.00005)",
     )
-    parser.add_argument(
+    g_search.add_argument(
+        "--max-results",
+        type=int,
+        default=3,
+        help="Maximum number of ranked novel arXiv papers to retrieve (default: 3)",
+    )
+    g_search.add_argument(
+        "--min-score",
+        type=float,
+        default=0.0,
+        help="Minimum composite rank score (0.0-100.0) filter threshold (default: 0.0)",
+    )
+    g_search.add_argument(
+        "--include-implemented",
+        action="store_true",
+        help="Disable strict novelty filtering and include papers already in CODEBASE_IMPLEMENTED_PAPERS",
+    )
+
+    g_extract = parser.add_argument_group("2. Google LangExtract 3-Class Source Grounding & HTML Reports")
+    g_extract.add_argument(
         "--extract-doc",
         type=str,
         default=None,
         help="Path to a local document (.pdf, .txt, .md, .tex) to extract with Google LangExtract and generate Python code",
     )
-    parser.add_argument(
-        "--max-results",
-        type=int,
-        default=3,
-        help="Maximum number of arXiv papers to retrieve and rank",
-    )
-    parser.add_argument(
-        "--min-score",
-        type=float,
-        default=0.0,
-        help="Minimum rank score (0-100) threshold",
-    )
-    parser.add_argument(
-        "--include-implemented",
-        action="store_true",
-        help="Include papers already in the implemented blacklist",
-    )
-    parser.add_argument(
+    g_extract.add_argument(
         "--html-report",
         type=str,
         default=None,
-        help="Write interactive Google LangExtract HTML visualization to this path",
+        help="Write self-contained interactive Google LangExtract HTML visualization (langextract.visualize) to this path",
     )
-    parser.add_argument(
+
+    g_codegen = parser.add_argument_group("3. Paper-to-Python Production Code Synthesis")
+    g_codegen.add_argument(
         "--output-dir",
         type=str,
         default=None,
-        help="Directory to write generated Python modules and deterministic scoring scripts",
+        help="Directory to write generated Python modules (arxiv_<id>_module.py) and deterministic scoring scripts",
     )
-    parser.add_argument(
+
+    g_dynarot = parser.add_argument_group("4. ModelFusion DynaRot Hardware Sizing & Auto-Provisioning")
+    g_dynarot.add_argument(
         "--dynarot",
         "--sys-info",
         dest="dynarot",
         action="store_true",
-        help="Run ModelFusion DynaRot hardware probe, Pareto knee-point routing, and compute budget split",
+        help="Probe live free RAM & free VRAM, compute 4-objective Pareto front & knee-point, and show Shinka/OpenEvolve compute split",
     )
-    parser.add_argument(
+    g_dynarot.add_argument(
         "--install-models",
         action="store_true",
-        help="Automatically install/pull optimal Ollama models based on live available RAM and VRAM",
+        help="Automatically install/pull optimal local Ollama models (ollama pull <model>) based on live available RAM and VRAM",
     )
-    parser.add_argument(
+
+    g_evolve = parser.add_argument_group("5. Combined ShinkaEvolve + OpenEvolve Evolutionary Search")
+    g_evolve.add_argument(
         "--evolve",
         "--evolves",
         "--evoves",
         dest="evolve",
         action="store_true",
         help=(
-            "Evolve synthesized Python code by combining ShinkaEvolve (UCB routing, Meta-Scratchpad, "
-            "Novelty Rejection) and OpenEvolve (Multi-Island MAP-Elites grid)"
+            "Evolve synthesized Python code by combining ShinkaEvolve (UCB1 routing, Meta-Scratchpad, "
+            "AST Novelty Rejection) and OpenEvolve (Multi-Island 2D MAP-Elites grid)"
         ),
     )
-    parser.add_argument(
+    g_evolve.add_argument(
         "--evolve-mode",
         type=str,
         choices=["sequential", "parallel", "hybrid"],
         default="hybrid",
-        help="Pairing mode for ShinkaEvolve + OpenEvolve: sequential, parallel, or hybrid (default: hybrid)",
+        help="Pairing mode for ShinkaEvolve + OpenEvolve: 'sequential', 'parallel', or 'hybrid' (default: hybrid)",
     )
-    parser.add_argument(
+    g_evolve.add_argument(
         "--generations",
         type=int,
         default=4,
         help="Number of evolutionary generations per stage (default: 4)",
     )
-    parser.add_argument(
+    g_evolve.add_argument(
         "--islands",
         type=int,
         default=3,
-        help="Number of OpenEvolve MAP-Elites islands (default: 3)",
+        help="Number of OpenEvolve MAP-Elites islands for behavioral niche exploration (default: 3)",
     )
-    parser.add_argument(
+    g_evolve.add_argument(
         "--elites-dir",
         type=str,
         default=None,
         help="Shared filesystem directory for ShinkaEvolve & OpenEvolve cross-pollinated elites",
     )
-    parser.add_argument(
+
+    g_swarm = parser.add_argument_group("6. Agentic Swarm, Universal MCP Server & Self-Test Suite")
+    g_swarm.add_argument(
         "--langgraph",
         action="store_true",
-        help="Execute the 4-Arm HMAC-SHA256 signed ArXiv-to-Code Swarm",
+        help="Execute the 4-Arm HMAC-SHA256 signed ArXiv-to-Code StateGraph Research & Evolutionary Swarm",
     )
-    parser.add_argument(
+    g_swarm.add_argument(
         "--mcp",
         action="store_true",
-        help="Start the ArXiv-to-Code stdio JSON-RPC MCP Server",
+        help="Start the ArXiv-to-Code Universal MCP Server over stdio JSON-RPC 2.0 (8 Tools)",
     )
-    parser.add_argument(
+    g_swarm.add_argument(
         "--test",
         action="store_true",
-        help="Run the 8-step automated end-to-end self-test suite",
+        help="Run the 8-step automated end-to-end functional self-test suite",
     )
     return parser
 

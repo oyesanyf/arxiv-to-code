@@ -4,17 +4,39 @@ import asyncio
 import json
 from pathlib import Path
 
-from arxiv_to_code.cli import main as cli_main
+from arxiv_to_code.cli import build_arg_parser, main as cli_main
 from arxiv_to_code.mcp_server import (
     arxiv_to_code_status,
     audit_defense_coverage,
+    build_mcp_arg_parser,
     dynarot_hardware_route_and_install,
     evolve_python_code,
     extract_document_langextract,
     generate_python_code_from_paper,
+    main as mcp_main,
     run_langgraph_arxiv_to_code_swarm,
     search_and_rank_arxiv_papers,
 )
+
+
+def test_cli_and_mcp_help_documentation(capsys) -> None:
+    cli_help = build_arg_parser().format_help()
+    assert "1. arXiv Discovery & Multi-Factor Ranking" in cli_help
+    assert "2. Google LangExtract 3-Class Source Grounding" in cli_help
+    assert "4. ModelFusion DynaRot Hardware Sizing" in cli_help
+    assert "5. Combined ShinkaEvolve + OpenEvolve Evolutionary Search" in cli_help
+    assert "--evolve, --evolves, --evoves" in cli_help
+    assert "--install-models" in cli_help
+
+    mcp_help = build_mcp_arg_parser().format_help()
+    assert "arxiv_to_code_status" in mcp_help
+    assert "dynarot_hardware_route_and_install" in mcp_help
+    assert "evolve_python_code" in mcp_help
+
+    mcp_main(["--list-tools"])
+    captured = capsys.readouterr().out
+    catalog = json.loads(captured)
+    assert catalog["total_tools"] == 8
 
 
 def test_cli_flags_evolve_and_dynarot(tmp_path: Path) -> None:

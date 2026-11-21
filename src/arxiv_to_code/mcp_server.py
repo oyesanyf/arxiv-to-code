@@ -450,7 +450,62 @@ async def run_langgraph_arxiv_to_code_swarm(
         return json.dumps({"error": str(exc), "arxiv_id": arxiv_id}, indent=2)
 
 
-def main() -> None:
+def build_mcp_arg_parser() -> "argparse.ArgumentParser":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="arxiv-to-code-mcp",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "ArXiv-to-Code Universal MCP Server (stdio JSON-RPC 2.0)\n"
+            "Exposes 8 specialized tools for arXiv search, 3-class Google LangExtract character-span\n"
+            "grounding, Paper-to-Python code synthesis, ModelFusion DynaRot hardware-aware routing,\n"
+            "and combined ShinkaEvolve + OpenEvolve evolutionary search."
+        ),
+        epilog=(
+            "Registered MCP Tools (8 Tools):\n"
+            "  1. arxiv_to_code_status              : Health, versions, active DynaRot tier & ranking weights\n"
+            "  2. dynarot_hardware_route_and_install: Live free RAM/VRAM probe, Pareto knee-point & ollama pull\n"
+            "  3. search_and_rank_arxiv_papers      : Search arXiv, 3-class LangExtract grounding & Python codegen\n"
+            "  4. extract_document_langextract      : Extract CharInterval spans from arXiv ID or local PDF/text + HTML\n"
+            "  5. generate_python_code_from_paper   : Synthesize EVOLVE-BLOCK Python module from arXiv ID (+ evolve)\n"
+            "  6. evolve_python_code                : Run ShinkaEvolve + OpenEvolve (sequential | parallel | hybrid)\n"
+            "  7. audit_defense_coverage            : Audit paper vectors across Python & multi-ring boundaries\n"
+            "  8. run_langgraph_arxiv_to_code_swarm : Execute 4-Arm HMAC-SHA256 signed StateGraph Research Swarm\n"
+        ),
+    )
+    parser.add_argument(
+        "--list-tools",
+        action="store_true",
+        help="Print JSON catalog of all 8 registered MCP tools and exit",
+    )
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version="arxiv-to-code-mcp 1.0.0",
+        help="Show MCP server version and exit",
+    )
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    parser = build_mcp_arg_parser()
+    args = parser.parse_args(argv)
+    if args.list_tools:
+        tools_catalog = [
+            {"name": "arxiv_to_code_status", "description": arxiv_to_code_status.__doc__.strip()},
+            {"name": "dynarot_hardware_route_and_install", "description": dynarot_hardware_route_and_install.__doc__.strip()},
+            {"name": "search_and_rank_arxiv_papers", "description": search_and_rank_arxiv_papers.__doc__.strip()},
+            {"name": "extract_document_langextract", "description": extract_document_langextract.__doc__.strip()},
+            {"name": "generate_python_code_from_paper", "description": generate_python_code_from_paper.__doc__.strip()},
+            {"name": "evolve_python_code", "description": evolve_python_code.__doc__.strip()},
+            {"name": "audit_defense_coverage", "description": audit_defense_coverage.__doc__.strip()},
+            {"name": "run_langgraph_arxiv_to_code_swarm", "description": run_langgraph_arxiv_to_code_swarm.__doc__.strip()},
+        ]
+        print(json.dumps({"server": "arxiv-to-code", "total_tools": 8, "tools": tools_catalog}, indent=2))
+        return
+
     sys.stderr.write(
         "Starting ArXiv-to-Code + Google LangExtract + ModelFusion DynaRot + ShinkaEvolve/OpenEvolve MCP Server on stdio (8 Tools Registered)...\n"
     )
