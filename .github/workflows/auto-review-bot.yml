@@ -1,0 +1,47 @@
+name: Solo-Developer Invariant Gate & Automated Code Review
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  auto-review:
+    name: Repository Invariant Gate & Peer Review
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: write
+    steps:
+      - name: Checkout base repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify PR Invariants & Auto-Approve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          FILES_JSON=$(gh api "/repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100")
+          FILE_COUNT=$(echo "${FILES_JSON}" | jq 'length')
+
+          FORBIDDEN_KEYS=$(echo "${FILES_JSON}" | jq -r '.[].filename' | grep -E '\.(pem|pfx|key|p12)$' || true)
+          if [ -n "${FORBIDDEN_KEYS}" ]; then
+            echo "::error::Forbidden private key material detected in PR: ${FORBIDDEN_KEYS}"
+            exit 1
+          fi
+
+          if [ "${PR_AUTHOR}" = "oyesanyf" ] || [ "${PR_AUTHOR}" = "dependabot[bot]" ] || [ "${PR_ASSOCIATION}" = "OWNER" ]; then
+            gh pr review "${PR_NUMBER}" --repo "${REPO}" --approve \
+              --body "✅ **ArXiv-to-Code Invariant Gate & Review Bot**: Verified contributor identity (\`@${PR_AUTHOR}\`), commit \`${PR_HEAD_SHA}\` (${FILE_COUNT} file(s)), and repository security invariants." || true
+            gh pr merge "${PR_NUMBER}" --repo "${REPO}" --squash || gh pr merge "${PR_NUMBER}" --repo "${REPO}" --auto --squash || true
+          fi

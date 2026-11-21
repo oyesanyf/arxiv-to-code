@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arxiv-to-code"
+version = "1.0.0"
+description = "Autonomous arXiv Research Discovery, Google LangExtract 3-Class Source Grounding, Paper-to-Python Code Synthesis, ModelFusion DynaRot Hardware-Aware Model Routing, and Combined ShinkaEvolve + OpenEvolve Evolutionary Optimization (CLI & MCP Server)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Oyesanya F." }
+]
+keywords = [
+    "arxiv",
+    "langextract",
+    "paper-to-code",
+    "arxiv-to-code",
+    "modelfusion",
+    "dynarot",
+    "shinkaevolve",
+    "openevolve",
+    "map-elites",
+    "mcp",
+    "langgraph",
+]
+dependencies = [
+    "arxiv>=2.1.0",
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+full = [
+    "langextract>=1.0.0",
+    "langgraph>=0.2.0",
+    "langchain-core>=0.3.0",
+    "psutil>=5.9.0",
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+arxiv-to-code = "arxiv_to_code.cli:main"
+arxiv-to-code-mcp = "arxiv_to_code.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-v -p no:langsmith"

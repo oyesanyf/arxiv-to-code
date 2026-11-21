@@ -1,0 +1,9 @@
+#!/bin/sh
+if [ "$ARXIV_TO_CODE_SKIP_POST_COMMIT_HOOK" = "1" ]; then
+    exit 0
+fi
+BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+if [ "$BRANCH" = "main" ]; then
+    echo "[post-commit] Triggering Solo-Developer PR Pipeline (scripts/solo_pr_ship.ps1)..."
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts/solo_pr_ship.ps1" -Title "$(git log -1 --pretty=%s)"
+fi
