@@ -23,7 +23,11 @@ The **ArXiv-to-Code All-in-One CLI** (`python arixv_to_code.py`) provides single
 | `--output-dir` | `str` | `"generated"` | Organized root output directory (`INDEX.md`, `MANIFEST.json`, and per-paper folders with `src/`, `eval/`, `evolved/`, `langextract_report.html`, `extraction_results.jsonl`, `metadata.json`, `README.md`). |
 | `--audit`, `--audit-defense` | `flag` | `False` | Run multi-target defense & invariant coverage audit across Python runtime, OshoosiClaw, KillSwitch, and AgentOctopus. |
 | `--verify-llm`, `--llm-verify`, `--verify`, `--verify-code` | `flag` | `False` | Verify generated (and evolved) Python code via Layer 1 Deterministic AST/Security/Unit-Test Gate + Layer 2 Local Open-Weight LLM-as-a-Judge (Ollama via DynaRot) and save `verification_report.json`. |
-| `--verify-model` | `str` | `None` | Optional model tag for `--verify-llm` (e.g., `qwen2.5:7b`, `gemma2:2b`, `deepseek-r1:7b`, or `gemini-2.5-flash`). |
+| `--verify-model` | `str` | `None` | Optional model tag for `--verify-llm` (e.g., `glm-4.7-flash`, `glm4:9b`, `qwen2.5:7b`, `deepseek-r1:7b`, or `gemini-2.5-flash`). |
+| `--verify-panel`, `--panel`, `--fusion-verify` | `flag` | `False` | Run **ModelFusion Panel-of-Models** verification (GLM + Qwen + DeepSeek + Gemma in memory-safe VRAM batches) followed by minority-preserving Judge Analysis + Layer-1 deterministic gate. |
+| `--panel-size` | `int` | `auto` | Number of panelists for `--verify-panel` (auto-derived via `derive_fusion_model_count()` from live free RAM/VRAM: `2–7`). |
+| `--panel-models` | `str` | `None` | Explicit comma-separated Ollama panelist list (e.g., `glm-4.7-flash,qwen2.5:7b,deepseek-r1:7b`). |
+| `--panel-mode` | `str` | `"multi-model"` | ModelFusion panel mode: `multi-model` (distinct families + persona variations) or `multi-sample` (diverse temperatures/personas of top model). |
 | `--dynarot`, `--sys-info` | `flag` | `False` | Probe live free RAM, free GPU VRAM, and free disk headroom, compute 4-objective Pareto front & QuorumRAG-calibrated GLM/Qwen/Gemma provision plan. |
 | `--model-family` | `str` | `"auto"` | Preferred open-weight Ollama model family calibrated to available RAM/VRAM/disk (`auto`, `glm` [`glm-4.7-flash`/`glm4:9b`], `qwen`, `gemma`). |
 | `--install-models` | `flag` | `False` | Automatically provision/pull (`ollama pull <model>`) resource-safe models (downsizing automatically if RAM/VRAM/disk is tight). |

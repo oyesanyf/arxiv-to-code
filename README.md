@@ -112,8 +112,8 @@ generated/
 | Goal | Command |
 |:---|:---|
 | **Show all flags, DynaRot tiers, pairing modes & examples** | `python arixv_to_code.py --help` |
-| **Search arXiv + Hybrid Evolution (3 rounds) + Local LLM Code Verification** | `python arixv_to_code.py --search "LLM container sandbox escape" --max-results 2 --evolves --evolve-mode hybrid --evolve-count 3 --generations 4 --islands 3 --verify-llm` |
-| **Search arXiv + Local Open-Weight Ollama Google LangExtract + LLM Verify** | `python arixv_to_code.py --search "multi-agent delegation security" --langextract-llm --langextract-model gemma2:2b --evolves --evolve-count 2 --verify-llm --verify-model qwen2.5:7b` |
+| **Search arXiv + Hybrid Evolution (3 rounds) + ModelFusion Panel-of-Models Verification** | `python arixv_to_code.py --search "LLM container sandbox escape" --max-results 2 --evolves --evolve-mode hybrid --evolve-count 3 --verify-panel --panel-size 3` |
+| **Search arXiv + GLM Family + Local Open-Weight Ollama Google LangExtract + LLM Verify** | `python arixv_to_code.py --search "multi-agent delegation security" --model-family glm --langextract-llm --evolves --evolve-count 2 --verify-llm` |
 | **Specific arXiv ID + Sequential Two-Stage (`ShinkaEvolve` $\to$ `OpenEvolve`)** | `python arixv_to_code.py --arxiv-id 2608.15888 --evolves --evolve-mode sequential --generations 4 --islands 3 --output-dir .\out_seq` |
 | **Specific arXiv ID + Parallel Cross-Pollinating Ensemble** | `python arixv_to_code.py --arxiv-id 2603.02277 --evolves --evolve-mode parallel --elites-dir .\shared_elites --output-dir .\out_par` |
 | **Specific arXiv ID + LLM-as-a-Judge Verification Only** | `python arixv_to_code.py --arxiv-id 2608.15888 --verify-llm` |

@@ -89,9 +89,13 @@ Executes the 4-Arm HMAC-SHA256 signed ArXiv-to-Code StateGraph Swarm (`arm_1_arx
   - `evolve_mode` (`str`, default: `"hybrid"`)
 
 ### Tool 9: `verify_generated_python_code`
-Verifies generated or evolved Python code against the arXiv paper's grounded spans, mathematical formulations, and security invariants using a fail-closed Deterministic AST + Runtime Test Gate combined with an Open-Weight LLM-as-a-Judge (local Ollama via ModelFusion DynaRot, or optional Gemini API).
+Verifies generated or evolved Python code against the arXiv paper's grounded spans, mathematical formulations, and security invariants using a fail-closed Deterministic AST + Runtime Test Gate combined with either a single Open-Weight LLM Judge or a full **ModelFusion Panel-of-Models** (`use_panel=True`: GLM + Qwen + DeepSeek + Gemma in VRAM-safe batches + minority-preserving Judge Analysis).
 - **Arguments**:
   - `arxiv_id` (`str`, default: `"2603.02277"`)
   - `python_source_code` (`str`, default: `""` — auto-synthesizes from `arxiv_id` if omitted)
-  - `verify_model` (`str`, default: `""` — auto-sized by ModelFusion DynaRot if omitted)
+  - `verify_model` (`str`, default: `""` — auto-sized by ModelFusion DynaRot / QuorumRAG if omitted)
   - `enable_llm` (`bool`, default: `True`)
+  - `use_panel` (`bool`, default: `False` — activates ModelFusion Panel-of-Models + Judge Analysis)
+  - `panel_size` (`int | None`, default: `None` — auto-derived from live free RAM/VRAM)
+  - `panel_models` (`str`, default: `""` — optional comma-separated Ollama panelist list)
+  - `panel_mode` (`str`, default: `"multi-model"` — `"multi-model"` or `"multi-sample"`)

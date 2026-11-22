@@ -288,6 +288,11 @@ def write_organized_paper_artifacts(
         "verification_verdict": verification_report.get("verdict") if verification_report else None,
         "verification_score": verification_report.get("overall_score") if verification_report else None,
         "llm_verified": verification_report.get("llm_verified", False) if verification_report else False,
+        "panel_verified": (
+            verification_report.get("verification_mode") == "panel_llm_and_deterministic_verified"
+            if verification_report
+            else False
+        ),
         "verification_report": (
             f"{rel_folder}/verification_report.json" if verification_report else ""
         ),
@@ -316,7 +321,7 @@ def write_organized_paper_artifacts(
         )
         spd_cell = f"{entry['speedup_ratio']}x" if entry.get("speedup_ratio") else "—"
         if entry.get("verified") and entry.get("verification_report"):
-            v_tag = "LLM+Det" if entry.get("llm_verified") else "Det"
+            v_tag = "Panel+Det" if entry.get("panel_verified") else ("LLM+Det" if entry.get("llm_verified") else "Det")
             ver_cell = (
                 f"[`{entry['verification_verdict']}`]({entry['verification_report']}) "
                 f"({entry['verification_score']}/100 {v_tag})"

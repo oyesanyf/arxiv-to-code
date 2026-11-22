@@ -82,6 +82,7 @@ from .langextract_engine import (
     search_and_rank_articles,
 )
 from .llm_verifier import verify_generated_python_code as _verify_generated_python_code_impl
+from .panel_verifier import run_model_panel_verification as _run_model_panel_verification_impl
 from .python_code_generator import synthesize_production_python_code
 from .swarm import run_langgraph_research_swarm
 
@@ -516,11 +517,16 @@ async def verify_generated_python_code(
     python_source_code: str = "",
     verify_model: str = "",
     enable_llm: bool = True,
+    use_panel: bool = False,
+    panel_size: Optional[int] = None,
+    panel_models: str = "",
+    panel_mode: str = "multi-model",
 ) -> str:
     """
     Verifies generated or evolved Python code against the arXiv paper's grounded spans,
     mathematical formulations, and security invariants using a fail-closed Deterministic AST +
-    Runtime Test Gate combined with an Open-Weight LLM-as-a-Judge (local Ollama via ModelFusion DynaRot).
+    Runtime Test Gate combined with either a single Open-Weight LLM Judge or a full ModelFusion
+    Panel-of-Models (`use_panel=True`: GLM + Qwen + DeepSeek + Gemma + minority-preserving Judge).
     """
     try:
         clean_id = normalize_arxiv_id(arxiv_id) or "2603.02277"
@@ -538,14 +544,27 @@ async def verify_generated_python_code(
             python_source_code = bundle["production_python_code"]
             code_stage = "synthesized"
 
-        report = _verify_generated_python_code_impl(
-            source_code=python_source_code,
-            paper=paper,
-            extractions=extractions,
-            code_stage=code_stage,
-            model_id=verify_model.strip() or None,
-            enable_llm=bool(enable_llm),
-        )
+        if use_panel:
+            explicit_list = [m.strip() for m in panel_models.split(",") if m.strip()] if panel_models.strip() else None
+            report = _run_model_panel_verification_impl(
+                source_code=python_source_code,
+                paper=paper,
+                extractions=extractions,
+                code_stage=code_stage,
+                panel_size=panel_size,
+                panel_models=explicit_list,
+                panel_mode=panel_mode,
+                enable_llm=bool(enable_llm),
+            )
+        else:
+            report = _verify_generated_python_code_impl(
+                source_code=python_source_code,
+                paper=paper,
+                extractions=extractions,
+                code_stage=code_stage,
+                model_id=verify_model.strip() or None,
+                enable_llm=bool(enable_llm),
+            )
         return json.dumps(report.to_dict(), indent=2)
     except Exception as exc:
         return json.dumps({"error": str(exc), "arxiv_id": arxiv_id}, indent=2)

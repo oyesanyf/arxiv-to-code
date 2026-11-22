@@ -41,6 +41,7 @@ from .langextract_engine import (
 )
 from .llm_verifier import verify_generated_python_code
 from .mcp_server import arxiv_to_code_status, main as run_mcp_server
+from .panel_verifier import run_model_panel_verification
 from .progress import create_progress_bar, spinner
 from .python_code_generator import synthesize_production_python_code
 from .swarm import run_langgraph_research_swarm
@@ -135,6 +136,9 @@ def normalize_cli_argv(argv: Optional[List[str]]) -> List[str]:
         "--llm-verify": "--verify-llm",
         "--verify": "--verify-llm",
         "--verify-code": "--verify-llm",
+        "--panel": "--verify-panel",
+        "--fusion-verify": "--verify-panel",
+        "--panel-verify": "--verify-panel",
     }
     for token in raw_list:
         if token.startswith("---"):
@@ -442,7 +446,37 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--verify-model",
         type=str,
         default=None,
-        help="Optional LLM model tag for --verify-llm (e.g., 'qwen2.5:7b', 'gemma2:2b', 'deepseek-r1:7b', or 'gemini-2.5-flash')",
+        help="Optional LLM model tag for --verify-llm (e.g., 'glm-4.7-flash', 'glm4:9b', 'qwen2.5:7b', 'deepseek-r1:7b')",
+    )
+    g_codegen.add_argument(
+        "--verify-panel",
+        "--panel",
+        "--fusion-verify",
+        dest="verify_panel",
+        action="store_true",
+        help=(
+            "Run ModelFusion Panel-of-Models verification (GLM + Qwen + DeepSeek + Gemma in memory-safe batches) "
+            "followed by minority-preserving Judge Analysis + Layer-1 deterministic gate"
+        ),
+    )
+    g_codegen.add_argument(
+        "--panel-size",
+        type=int,
+        default=None,
+        help="Number of panelists for --verify-panel (default: auto-derived from live free RAM/VRAM via derive_fusion_model_count)",
+    )
+    g_codegen.add_argument(
+        "--panel-models",
+        type=str,
+        default=None,
+        help="Optional comma-separated model tags for --verify-panel (e.g., 'glm-4.7-flash,qwen2.5:7b,deepseek-r1:7b')",
+    )
+    g_codegen.add_argument(
+        "--panel-mode",
+        type=str,
+        choices=["multi-model", "multi-sample"],
+        default="multi-model",
+        help="ModelFusion panel mode: 'multi-model' (distinct open-weight families, default) or 'multi-sample' (diverse temperatures/personas)",
     )
 
     g_dynarot = parser.add_argument_group("4. ModelFusion DynaRot Hardware Sizing & Auto-Provisioning")
@@ -603,7 +637,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 auto_pull=True,
             )
         print(json.dumps(prov, indent=2), flush=True)
-        if not args.arxiv_id and not args.evolve and not args.dynarot and not args.extract_doc and not args.audit and not args.verify_llm:
+        if not args.arxiv_id and not args.evolve and not args.dynarot and not args.extract_doc and not args.audit and not args.verify_llm and not args.verify_panel:
             return 0
 
     with spinner("ModelFusion DynaRot: probing live free RAM, GPU VRAM, disk & Pareto knee-point", enabled=show_ui):
@@ -614,7 +648,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("[MODELFUSION DYNAROT] HARDWARE SIZING, PARETO FRONT & COMPUTE SPLIT", flush=True)
         print("================================================================================", flush=True)
         print(json.dumps(dynarot_decision.to_dict(), indent=2), flush=True)
-        if not args.arxiv_id and not args.evolve and not args.extract_doc and not args.audit and not args.verify_llm:
+        if not args.arxiv_id and not args.evolve and not args.extract_doc and not args.audit and not args.verify_llm and not args.verify_panel:
             return 0
 
     if args.audit:
@@ -833,7 +867,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print(f"    * {ev['direction']} -> {ev}", flush=True)
 
             verification_report = None
-            if args.verify_llm:
+            if args.verify_panel or args.verify_llm:
                 target_code = (
                     evo_report["champion_candidate"]["source_code"]
                     if evo_report is not None
@@ -841,25 +875,54 @@ def main(argv: Optional[List[str]] = None) -> int:
                 )
                 code_stage = "evolved_champion" if evo_report is not None else "synthesized"
                 print("\n================================================================================", flush=True)
-                print(
-                    f"[LLM CODE VERIFIER] Auditing {code_stage} Python code for arXiv:{code_bundle['clean_arxiv_id']}...",
-                    flush=True,
-                )
-                print("================================================================================", flush=True)
-                with spinner(
-                    f"Verifying {code_stage} code with Deterministic Gate + LLM Judge ({args.verify_model or dynarot_decision.shinka_heavy_reasoning_model})",
-                    enabled=show_ui,
-                ):
-                    ver_obj = verify_generated_python_code(
-                        source_code=target_code,
-                        paper=item,
-                        extractions=item["extractions"],
-                        code_stage=code_stage,
-                        model_id=args.verify_model,
-                        dynarot_decision=dynarot_decision,
-                        enable_llm=True,
+                if args.verify_panel:
+                    print(
+                        f"[MODELFUSION PANEL VERIFIER] Deliberating {code_stage} Python code for arXiv:{code_bundle['clean_arxiv_id']} ({args.panel_mode})...",
+                        flush=True,
                     )
-                    verification_report = ver_obj.to_dict()
+                else:
+                    print(
+                        f"[LLM CODE VERIFIER] Auditing {code_stage} Python code for arXiv:{code_bundle['clean_arxiv_id']}...",
+                        flush=True,
+                    )
+                print("================================================================================", flush=True)
+                if args.verify_panel:
+                    explicit_panel = (
+                        [m.strip() for m in args.panel_models.split(",") if m.strip()]
+                        if args.panel_models
+                        else None
+                    )
+                    with spinner(
+                        f"Running ModelFusion Panel-of-Models + Judge Analysis on {code_stage} code",
+                        enabled=show_ui,
+                    ):
+                        ver_obj = run_model_panel_verification(
+                            source_code=target_code,
+                            paper=item,
+                            extractions=item["extractions"],
+                            code_stage=code_stage,
+                            panel_size=args.panel_size,
+                            panel_models=explicit_panel,
+                            panel_mode=args.panel_mode,
+                            dynarot_decision=dynarot_decision,
+                            enable_llm=True,
+                        )
+                        verification_report = ver_obj.to_dict()
+                else:
+                    with spinner(
+                        f"Verifying {code_stage} code with Deterministic Gate + LLM Judge ({args.verify_model or dynarot_decision.shinka_heavy_reasoning_model})",
+                        enabled=show_ui,
+                    ):
+                        ver_obj = verify_generated_python_code(
+                            source_code=target_code,
+                            paper=item,
+                            extractions=item["extractions"],
+                            code_stage=code_stage,
+                            model_id=args.verify_model,
+                            dynarot_decision=dynarot_decision,
+                            enable_llm=True,
+                        )
+                        verification_report = ver_obj.to_dict()
 
                 det_c = verification_report["deterministic_checks"]
                 llm_a = verification_report["llm_audit"]
@@ -882,6 +945,22 @@ def main(argv: Optional[List[str]] = None) -> int:
                     f"HMAC={det_c['constant_time_hmac_used']} | SafeCalls={det_c['zero_dangerous_calls']}",
                     flush=True,
                 )
+                panel_a = llm_a.get("panel_audit")
+                if panel_a:
+                    ja = panel_a.get("judge_analysis", {})
+                    print(
+                        f"  ModelFusion Panel     : mode={panel_a['panel_mode']} | "
+                        f"panelists={panel_a['responded_panelists']}/{panel_a['effective_panel_size']} | "
+                        f"batch_size={panel_a['batch_size']} | judge={panel_a['judge_model']} "
+                        f"(minority_override={ja.get('minority_override_triggered', False)})",
+                        flush=True,
+                    )
+                    if ja.get("consensus"):
+                        print(f"  Judge Consensus       : {ja['consensus'][0]}", flush=True)
+                    if ja.get("disagreements"):
+                        print(f"  Judge Disagreements   : {ja['disagreements']}", flush=True)
+                    if ja.get("risk_flags"):
+                        print(f"  Judge Risk Flags      : {ja['risk_flags'][:3]}", flush=True)
                 if verification_report["llm_verified"]:
                     print(
                         f"  LLM Judge Scores      : Paper Fidelity={llm_a['paper_fidelity_score']}/100 | "
