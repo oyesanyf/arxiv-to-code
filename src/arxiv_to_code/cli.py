@@ -41,6 +41,10 @@ from .langextract_engine import (
 )
 from .llm_verifier import verify_generated_python_code
 from .mcp_server import arxiv_to_code_status, main as run_mcp_server
+from .ollama_provisioner import (
+    dynamically_provision_ollama_and_models,
+    ensure_models_for_pipeline,
+)
 from .panel_verifier import run_model_panel_verification
 from .progress import create_progress_bar, spinner
 from .python_code_generator import synthesize_production_python_code
@@ -81,8 +85,9 @@ EXECUTABLE CLI EXAMPLES (ALL FLAGS VIA python arixv_to_code.py)
   # 3. Probe live RAM/VRAM, Pareto knee-point model, and Shinka/OpenEvolve compute split
   python arixv_to_code.py --dynarot
 
-  # 4. Auto-install/pull optimal Ollama models based on live available RAM & VRAM
+  # 4. Auto-install Ollama (if missing) & dynamically pull resource-fitted models (e.g., glm4:9b + deepseek-r1:7b)
   python arixv_to_code.py --install-models
+  python arixv_to_code.py --install-models --panel-models "glm4:9b,deepseek-r1:7b"
 
   # 5. Search arXiv, extract 3-class Google LangExtract spans, and generate Python code
   python arixv_to_code.py --search "LLM container sandbox escape" --max-results 3 --output-dir ./generated
@@ -139,6 +144,9 @@ def normalize_cli_argv(argv: Optional[List[str]]) -> List[str]:
         "--panel": "--verify-panel",
         "--fusion-verify": "--verify-panel",
         "--panel-verify": "--verify-panel",
+        "--provision": "--install-models",
+        "--install-ollama": "--install-models",
+        "--pull-models": "--install-models",
     }
     for token in raw_list:
         if token.startswith("---"):
@@ -489,8 +497,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     g_dynarot.add_argument(
         "--install-models",
+        "--provision",
+        "--install-ollama",
+        dest="install_models",
         action="store_true",
-        help="Automatically install/pull optimal local Ollama models (ollama pull <model>) based on live available RAM, VRAM, and disk headroom",
+        help=(
+            "Auto-install Ollama (if missing), start `ollama serve` detached, dynamically select "
+            "resource-fitted open-weight panel models (e.g., `glm4:9b` + `deepseek-r1:7b`), and "
+            "pull them via streaming `/api/pull` with live tqdm byte progress"
+        ),
+    )
+    g_dynarot.add_argument(
+        "--auto-provision",
+        action="store_true",
+        help=(
+            "On-demand auto-provisioning guard for --verify-panel, --verify-llm, and --langextract-llm: "
+            "automatically installs/starts Ollama and pulls missing resource-fitted models before execution"
+        ),
     )
     g_dynarot.add_argument(
         "--model-family",
@@ -626,19 +649,45 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     show_ui = not args.no_progress
     router = DynaRotModelRouter()
+    explicit_provision_models = (
+        [m.strip() for m in args.panel_models.split(",") if m.strip()]
+        if args.panel_models
+        else ([args.verify_model.strip()] if args.verify_model and args.verify_model.strip() else None)
+    )
 
     if args.install_models:
         print("================================================================================", flush=True)
-        print("[MODELFUSION DYNAROT] RESOURCE-BASED MODEL PROVISIONING & AUTO-INSTALL", flush=True)
+        print("[OLLAMA PROVISIONER] DYNAMIC OLLAMA AUTO-INSTALL & RESOURCE-BASED MODEL PULL", flush=True)
         print("================================================================================", flush=True)
-        with spinner("Probing runtime free RAM/VRAM/disk and provisioning Ollama models", enabled=show_ui):
-            prov = router.provision_models_for_resources(
-                model_family=args.model_family,
-                auto_pull=True,
-            )
+        prov = dynamically_provision_ollama_and_models(
+            model_family=args.model_family,
+            explicit_models=explicit_provision_models,
+            auto_install_ollama=True,
+            auto_pull=True,
+            prefer_vram_resident=True,
+            show_progress=show_ui,
+        )
         print(json.dumps(prov, indent=2), flush=True)
         if not args.arxiv_id and not args.evolve and not args.dynarot and not args.extract_doc and not args.audit and not args.verify_llm and not args.verify_panel:
             return 0
+    elif args.auto_provision:
+        min_needed = (args.panel_size or 2) if args.verify_panel else 1
+        print("================================================================================", flush=True)
+        print("[OLLAMA PROVISIONER] ON-DEMAND AUTO-PROVISION CHECK", flush=True)
+        print("================================================================================", flush=True)
+        auto_res = ensure_models_for_pipeline(
+            min_eligible_models=min_needed,
+            model_family=args.model_family,
+            explicit_models=explicit_provision_models,
+            auto_install_ollama=True,
+            prefer_vram_resident=True,
+            show_progress=show_ui,
+        )
+        print(
+            f"  [PROVISION] Action={auto_res.get('action')} | Online={auto_res.get('ollama_online')} | "
+            f"Installed={auto_res.get('installed_models_after', [])}",
+            flush=True,
+        )
 
     with spinner("ModelFusion DynaRot: probing live free RAM, GPU VRAM, disk & Pareto knee-point", enabled=show_ui):
         dynarot_decision = router.route(prompt=args.query, model_family=args.model_family)

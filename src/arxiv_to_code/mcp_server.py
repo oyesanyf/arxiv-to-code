@@ -82,6 +82,10 @@ from .langextract_engine import (
     search_and_rank_articles,
 )
 from .llm_verifier import verify_generated_python_code as _verify_generated_python_code_impl
+from .ollama_provisioner import (
+    dynamically_provision_ollama_and_models as _dynamically_provision_ollama_and_models_impl,
+    ensure_models_for_pipeline as _ensure_models_for_pipeline_impl,
+)
 from .panel_verifier import run_model_panel_verification as _run_model_panel_verification_impl
 from .python_code_generator import synthesize_production_python_code
 from .swarm import run_langgraph_research_swarm
@@ -142,6 +146,9 @@ async def dynarot_hardware_route_and_install(
     prompt: str = "Synthesize production Python code from arXiv paper and evolve with ShinkaEvolve + OpenEvolve",
     model_family: str = "auto",
     auto_install_models: bool = False,
+    auto_install_ollama: bool = False,
+    explicit_models: str = "",
+    prefer_vram_resident: bool = True,
     override_free_ram_gb: Optional[float] = None,
     override_free_vram_mb: Optional[float] = None,
     override_free_disk_gb: Optional[float] = None,
@@ -149,17 +156,23 @@ async def dynarot_hardware_route_and_install(
     """
     Executes ModelFusion DynaRot + QuorumRAG AutoFusion hardware-aware routing strictly under
     the Dynamic Available Memory Law (free RAM, free VRAM, and free disk headroom — never total RAM),
-    supports GLM (`glm-4.7-flash`, `glm4:9b`), Qwen 2.5, and Gemma families, splits compute budget
-    between ShinkaEvolve and OpenEvolve, and optionally pulls missing Ollama models.
+    supports GLM (`glm-4.7-flash`, `glm4:9b`), DeepSeek-R1 (`deepseek-r1:7b`), Qwen 2.5, and Gemma
+    families, splits compute budget between ShinkaEvolve and OpenEvolve, and optionally installs
+    Ollama, starts `ollama serve` detached, and streams missing model downloads via `/api/pull`.
     """
     router = DynaRotModelRouter()
-    if auto_install_models:
-        res = router.provision_models_for_resources(
+    if auto_install_models or auto_install_ollama:
+        explicit_list = [m.strip() for m in explicit_models.split(",") if m.strip()] if explicit_models.strip() else None
+        res = _dynamically_provision_ollama_and_models_impl(
+            model_family=model_family,
+            explicit_models=explicit_list,
+            auto_install_ollama=bool(auto_install_ollama),
+            auto_pull=bool(auto_install_models),
+            prefer_vram_resident=bool(prefer_vram_resident),
             override_free_ram_gb=override_free_ram_gb,
             override_free_vram_mb=override_free_vram_mb,
             override_free_disk_gb=override_free_disk_gb,
-            model_family=model_family,
-            auto_pull=True,
+            show_progress=False,
         )
         return json.dumps(res, indent=2)
 
@@ -521,12 +534,14 @@ async def verify_generated_python_code(
     panel_size: Optional[int] = None,
     panel_models: str = "",
     panel_mode: str = "multi-model",
+    auto_provision: bool = False,
 ) -> str:
     """
     Verifies generated or evolved Python code against the arXiv paper's grounded spans,
     mathematical formulations, and security invariants using a fail-closed Deterministic AST +
     Runtime Test Gate combined with either a single Open-Weight LLM Judge or a full ModelFusion
-    Panel-of-Models (`use_panel=True`: GLM + Qwen + DeepSeek + Gemma + minority-preserving Judge).
+    Panel-of-Models (`use_panel=True`: GLM + Qwen + DeepSeek + Gemma + minority-preserving Judge),
+    optionally auto-provisioning Ollama & resource-fitted models (`auto_provision=True`).
     """
     try:
         clean_id = normalize_arxiv_id(arxiv_id) or "2603.02277"
@@ -544,8 +559,16 @@ async def verify_generated_python_code(
             python_source_code = bundle["production_python_code"]
             code_stage = "synthesized"
 
+        explicit_list = [m.strip() for m in panel_models.split(",") if m.strip()] if panel_models.strip() else None
+        if auto_provision and enable_llm:
+            _ensure_models_for_pipeline_impl(
+                min_eligible_models=(panel_size or 2) if use_panel else 1,
+                explicit_models=explicit_list or ([verify_model.strip()] if verify_model.strip() else None),
+                auto_install_ollama=True,
+                show_progress=False,
+            )
+
         if use_panel:
-            explicit_list = [m.strip() for m in panel_models.split(",") if m.strip()] if panel_models.strip() else None
             report = _run_model_panel_verification_impl(
                 source_code=python_source_code,
                 paper=paper,

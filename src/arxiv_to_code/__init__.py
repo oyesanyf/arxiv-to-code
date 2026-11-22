@@ -78,6 +78,15 @@ from .models import (
     EvolutionCandidate,
     SystemHardwareResources,
 )
+from .ollama_provisioner import (
+    detect_ollama_executable,
+    dynamically_provision_ollama_and_models,
+    ensure_models_for_pipeline,
+    ensure_ollama_daemon,
+    ensure_ollama_installed,
+    pull_ollama_model_streaming,
+    select_dynamic_provision_targets,
+)
 from .python_code_generator import (
     synthesize_deterministic_scoring_script,
     synthesize_production_code,
@@ -105,6 +114,11 @@ __all__ = [
     "audit_defense_coverage_multi_target",
     "compute_article_rank",
     "detect_live_hardware",
+    "detect_ollama_executable",
+    "dynamically_provision_ollama_and_models",
+    "ensure_models_for_pipeline",
+    "ensure_ollama_daemon",
+    "ensure_ollama_installed",
     "evaluate_python_candidate",
     "evaluate_python_candidate_file",
     "extract_evolve_block",
@@ -115,6 +129,7 @@ __all__ = [
     "normalize_arxiv_id",
     "parse_llm_verification_json",
     "probe_ollama_models",
+    "pull_ollama_model_streaming",
     "replace_evolve_block",
     "run_combined_shinka_openevolve",
     "run_deterministic_code_verification",
@@ -122,6 +137,7 @@ __all__ = [
     "sanitize_model_tag",
     "search_and_rank_articles",
     "search_breakout_papers",
+    "select_dynamic_provision_targets",
     "size_models_by_available_memory",
     "synthesize_deterministic_scoring_script",
     "synthesize_production_code",

@@ -30,12 +30,17 @@ Returns server health, Python/LangExtract/arXiv package versions, active ModelFu
 - **Arguments**: None
 
 ### Tool 2: `dynarot_hardware_route_and_install`
-Probes live runtime free RAM (`free_ram_gb`) and free GPU VRAM (`free_vram_mb`), computes the 4-objective Pareto front and geometric knee-point model, splits compute between `shinka_heavy_reasoning_model` and `openevolve_fast_mutation_model`, and optionally executes `ollama pull` for missing models.
+Probes live runtime free RAM (`free_ram_gb`), free GPU VRAM (`free_vram_mb`), and free disk headroom (`free_disk_gb`), computes the 4-objective Pareto front and geometric knee-point model, splits compute between `shinka_heavy_reasoning_model` and `openevolve_fast_mutation_model`, and optionally installs Ollama (`auto_install_ollama=True`), starts `ollama serve` detached, and dynamically streams missing resource-fitted models (`glm4:9b`, `deepseek-r1:7b`, etc.) via `/api/pull`.
 - **Arguments**:
   - `prompt` (`str`, default: `"Synthesize production Python code from arXiv paper and evolve with ShinkaEvolve + OpenEvolve"`)
+  - `model_family` (`str`, default: `"auto"` — `"auto"`, `"glm"`, `"qwen"`, `"gemma"`)
   - `auto_install_models` (`bool`, default: `False`)
+  - `auto_install_ollama` (`bool`, default: `False`)
+  - `explicit_models` (`str`, default: `""` — optional comma-separated tags, e.g. `"glm4:9b,deepseek-r1:7b"`)
+  - `prefer_vram_resident` (`bool`, default: `True`)
   - `override_free_ram_gb` (`float | None`, default: `None`)
   - `override_free_vram_mb` (`float | None`, default: `None`)
+  - `override_free_disk_gb` (`float | None`, default: `None`)
 
 ### Tool 3: `search_and_rank_arxiv_papers`
 Searches arXiv, applies strict novelty filtering (`only_novel_enhancements=True`), extracts 3-class character-grounded spans, ranks papers `0–100`, synthesizes production Python code for each paper, and optionally evolves each module when `evolve=True`.
@@ -99,3 +104,4 @@ Verifies generated or evolved Python code against the arXiv paper's grounded spa
   - `panel_size` (`int | None`, default: `None` — auto-derived from live free RAM/VRAM)
   - `panel_models` (`str`, default: `""` — optional comma-separated Ollama panelist list)
   - `panel_mode` (`str`, default: `"multi-model"` — `"multi-model"` or `"multi-sample"`)
+  - `auto_provision` (`bool`, default: `False` — automatically installs/starts Ollama and pulls missing resource-fitted models before verification)

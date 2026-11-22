@@ -121,7 +121,8 @@ generated/
 | **Extract local PDF / Markdown / Text + Interactive LangExtract HTML + Evolve** | `python arixv_to_code.py --extract-doc .\paper.pdf --html-report .\langextract_audit.html --evolves --output-dir .\out_doc` |
 | **Specific arXiv ID + Interactive LangExtract HTML Report** | `python arixv_to_code.py --arxiv-id 2603.02277 --html-report .\audit_2603_02277.html --generate --output-dir .\out_html` |
 | **ModelFusion DynaRot Hardware Sizing & Compute Split** | `python arixv_to_code.py --dynarot` |
-| **Auto-Install Ollama Models for Your Free RAM/VRAM** | `python arixv_to_code.py --install-models` |
+| **Auto-Install Ollama & Dynamically Pull Resource-Fitted Models (`glm4:9b` + `deepseek-r1:7b`)** | `python arixv_to_code.py --install-models` |
+| **Auto-Provision Missing Models On-Demand + Hybrid Evolve + Panel Verify** | `python arixv_to_code.py --arxiv-id 2608.15888 --auto-provision --langextract-llm --evolves --evolve-count 2 --verify-panel` |
 | **Multi-Target Defense Coverage Audit** | `python arixv_to_code.py --arxiv-id 2603.02277 --audit` |
 | **4-Arm HMAC-Signed LangGraph Research & Evolution Swarm** | `python arixv_to_code.py --arxiv-id 2603.02277 --langgraph --evolve-mode hybrid` |
 | **Full JSON Status Report** | `python arixv_to_code.py --status` |

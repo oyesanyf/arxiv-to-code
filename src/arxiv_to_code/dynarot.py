@@ -1231,13 +1231,26 @@ class DynaRotModelRouter:
         override_free_disk_gb: Optional[float] = None,
         model_family: str = "auto",
         auto_pull: bool = True,
-        pull_timeout_sec: int = 120,
+        auto_install_ollama: bool = False,
+        explicit_models: Optional[List[str]] = None,
+        prefer_vram_resident: bool = True,
+        use_dynamic_panel_targets: bool = False,
+        show_progress: bool = False,
+        pull_timeout_sec: int = 1800,
     ) -> Dict[str, Any]:
         """
         Determines optimal models for current runtime free RAM, VRAM & free disk using
         ModelFusion DynaRot + QuorumRAG `calculate_provision_plan()` BEFORE any pull,
-        automatically downsizing oversized requests and pulling via Ollama (`ollama pull <model>`).
+        optionally installs Ollama & starts `ollama serve` detached, automatically downsizes
+        oversized requests, and streams downloads via HTTP `/api/pull` with live `tqdm` progress.
         """
+        from .ollama_provisioner import (
+            detect_ollama_executable,
+            ensure_ollama_daemon,
+            pull_ollama_model_streaming,
+            select_dynamic_provision_targets,
+        )
+
         hw = detect_live_hardware(
             override_free_ram_gb=override_free_ram_gb,
             override_free_vram_mb=override_free_vram_mb,
@@ -1249,30 +1262,59 @@ class DynaRotModelRouter:
             override_free_disk_gb=override_free_disk_gb,
             model_family=model_family,
         )
-        ollama_bin = shutil.which("ollama")
-        ollama_online, installed_before = probe_ollama_models(
-            endpoint=self.endpoint,
-            timeout_sec=self.probe_timeout_sec,
-        )
 
-        raw_targets = list(
-            dict.fromkeys(
-                [
-                    decision.primary_model,
-                    decision.shinka_heavy_reasoning_model,
-                    decision.openevolve_fast_mutation_model,
-                ]
+        daemon_status: Dict[str, Any]
+        if auto_pull:
+            daemon_status = ensure_ollama_daemon(
+                endpoint=self.endpoint,
+                auto_install_ollama=auto_install_ollama,
+                wait_timeout_sec=10.0,
             )
-        )
-        # Apply QuorumRAG pre-provisioning RAM/VRAM/Disk downsizing gate to every target
+            ollama_online = bool(daemon_status.get("online"))
+            installed_before = list(daemon_status.get("installed_models") or [])
+        else:
+            ollama_online, installed_before = probe_ollama_models(
+                endpoint=self.endpoint,
+                timeout_sec=self.probe_timeout_sec,
+            )
+            daemon_status = {
+                "online": ollama_online,
+                "endpoint": self.endpoint,
+                "action": "already_running" if ollama_online else "offline_dry_run",
+                "binary": detect_ollama_executable(),
+                "installed_models": installed_before,
+            }
+
         target_models: List[str] = []
         target_plans: Dict[str, Dict[str, Any]] = {}
-        for mt in raw_targets:
-            plan = calculate_provision_plan(mt, hw, installed_before)
-            eff = plan["effective_tag"]
-            if eff not in target_plans:
-                target_plans[eff] = plan
-                target_models.append(eff)
+        if explicit_models or use_dynamic_panel_targets:
+            dyn_tags, dyn_plans = select_dynamic_provision_targets(
+                hw=hw,
+                installed_models=installed_before,
+                model_family=model_family,
+                explicit_models=explicit_models,
+                prefer_vram_resident=prefer_vram_resident,
+            )
+            for tag, plan in zip(dyn_tags, dyn_plans):
+                target_models.append(tag)
+                target_plans[tag] = plan
+        else:
+            raw_targets = list(
+                dict.fromkeys(
+                    [
+                        decision.primary_model,
+                        decision.shinka_heavy_reasoning_model,
+                        decision.openevolve_fast_mutation_model,
+                    ]
+                )
+            )
+            # Apply QuorumRAG pre-provisioning RAM/VRAM/Disk downsizing gate to every target
+            for mt in raw_targets:
+                plan = calculate_provision_plan(mt, hw, installed_before)
+                eff = plan["effective_tag"]
+                if eff not in target_plans:
+                    target_plans[eff] = plan
+                    target_models.append(eff)
 
         pull_results: List[Dict[str, Any]] = []
         for model_tag in target_models:
@@ -1309,7 +1351,7 @@ class DynaRotModelRouter:
                 )
                 continue
 
-            if not ollama_bin and not ollama_online:
+            if not ollama_online:
                 pull_results.append(
                     {
                         "model": clean_tag,
@@ -1320,52 +1362,24 @@ class DynaRotModelRouter:
                 )
                 continue
 
-            # Attempt background or bounded CLI pull
-            try:
-                creationflags = 0x08000000 if platform.system() == "Windows" else 0
-                proc = subprocess.run(
-                    [ollama_bin or "ollama", "pull", clean_tag],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    timeout=pull_timeout_sec,
-                    creationflags=creationflags,
-                )
-                if proc.returncode == 0:
-                    pull_results.append(
-                        {
-                            "model": clean_tag,
-                            "status": "installed",
-                            "command": f"ollama pull {clean_tag}",
-                        }
-                    )
-                else:
-                    pull_results.append(
-                        {
-                            "model": clean_tag,
-                            "status": "pull_failed_fallback_ready",
-                            "command": f"ollama pull {clean_tag}",
-                            "stderr": (proc.stderr or "").strip()[:240],
-                        }
-                    )
-            except Exception as exc:
-                pull_results.append(
-                    {
-                        "model": clean_tag,
-                        "status": "pull_deferred_or_timed_out",
-                        "command": f"ollama pull {clean_tag}",
-                        "detail": str(exc)[:200],
-                    }
-                )
+            stream_res = pull_ollama_model_streaming(
+                model_tag=clean_tag,
+                endpoint=self.endpoint,
+                timeout_sec=pull_timeout_sec,
+                show_progress=show_progress,
+            )
+            pull_results.append(stream_res)
 
-        _, installed_after = probe_ollama_models(
+        _OLLAMA_PROBE_CACHE.pop(self.endpoint, None)
+        online_after, installed_after = probe_ollama_models(
             endpoint=self.endpoint,
             timeout_sec=self.probe_timeout_sec,
         )
 
         return {
             "dynarot_decision": decision.to_dict(),
-            "ollama_online": ollama_online,
+            "ollama_online": online_after or ollama_online,
+            "daemon_status": daemon_status,
             "target_models": target_models,
             "installed_models": installed_after or installed_before,
             "provisioning_results": pull_results,

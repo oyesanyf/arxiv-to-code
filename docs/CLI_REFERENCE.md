@@ -30,7 +30,8 @@ The **ArXiv-to-Code All-in-One CLI** (`python arixv_to_code.py`) provides single
 | `--panel-mode` | `str` | `"multi-model"` | ModelFusion panel mode: `multi-model` (distinct families + persona variations) or `multi-sample` (diverse temperatures/personas of top model). |
 | `--dynarot`, `--sys-info` | `flag` | `False` | Probe live free RAM, free GPU VRAM, and free disk headroom, compute 4-objective Pareto front & QuorumRAG-calibrated GLM/Qwen/Gemma provision plan. |
 | `--model-family` | `str` | `"auto"` | Preferred open-weight Ollama model family calibrated to available RAM/VRAM/disk (`auto`, `glm` [`glm-4.7-flash`/`glm4:9b`], `qwen`, `gemma`). |
-| `--install-models` | `flag` | `False` | Automatically provision/pull (`ollama pull <model>`) resource-safe models (downsizing automatically if RAM/VRAM/disk is tight). |
+| `--install-models`, `--provision`, `--install-ollama` | `flag` | `False` | Auto-install Ollama (if missing, zero registry PATH mutation), start `ollama serve` detached, dynamically select resource-fitted complementary panel models (e.g., `glm4:9b` + `deepseek-r1:7b` on 8 GB VRAM / 12+ GB RAM hosts), and stream `/api/pull` with live `tqdm` byte progress bars. |
+| `--auto-provision` | `flag` | `False` | On-demand auto-provisioning guard for `--verify-panel`, `--verify-llm`, and `--langextract-llm`: automatically installs/starts Ollama and pulls missing resource-fitted models before execution. |
 | `--evolves`, `--evolve`, `--evoves` *(also `---evolves`)* | `flag` | `False` | Activate the combined **ShinkaEvolve + OpenEvolve** evolutionary optimization pipeline on the synthesized Python code. |
 | `--evolve-mode` | `str` | `"hybrid"` | Pairing mode for `ShinkaEvolve` + `OpenEvolve`: `sequential`, `parallel`, or `hybrid`. |
 | `--evolve-count` | `int` | `1` | Number of full evolutionary cycles/rounds to execute `OpenEvolve` + `ShinkaEvolve` (carrying forward champions & MAP-Elites grid across every round). |
@@ -61,7 +62,8 @@ The **ArXiv-to-Code All-in-One CLI** (`python arixv_to_code.py`) provides single
 | **Extract local PDF / Markdown / Text + Interactive LangExtract HTML + Evolve** | `python arixv_to_code.py --extract-doc .\paper.pdf --html-report .\langextract_audit.html --evolves --output-dir .\out_doc` |
 | **Specific arXiv ID + Interactive LangExtract HTML Report** | `python arixv_to_code.py --arxiv-id 2603.02277 --html-report .\audit_2603_02277.html --generate --output-dir .\out_html` |
 | **ModelFusion DynaRot Hardware Sizing & Compute Split** | `python arixv_to_code.py --dynarot` |
-| **Auto-Install Ollama Models for Your Free RAM/VRAM** | `python arixv_to_code.py --install-models` |
+| **Auto-Install Ollama & Dynamically Pull Resource-Fitted Models (`glm4:9b` + `deepseek-r1:7b`)** | `python arixv_to_code.py --install-models` |
+| **Auto-Provision Missing Models On-Demand + Hybrid Evolve + ModelFusion Panel Verify** | `python arixv_to_code.py --arxiv-id 2608.15888 --auto-provision --langextract-llm --evolves --evolve-count 2 --verify-panel` |
 | **Multi-Target Defense Coverage Audit** | `python arixv_to_code.py --arxiv-id 2603.02277 --audit` |
 | **4-Arm HMAC-Signed LangGraph Research & Evolution Swarm** | `python arixv_to_code.py --arxiv-id 2603.02277 --langgraph --evolve-mode hybrid` |
 | **Full JSON Status Report** | `python arixv_to_code.py --status` |

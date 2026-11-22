@@ -107,6 +107,13 @@ class FallbackProgressBar:
         self.n = min(self.total, self.n + n)
         self._render()
 
+    def reset(self, total: Optional[int] = None) -> None:
+        if total is not None:
+            self.total = max(1, int(total))
+        self.n = 0
+        self._start = time.perf_counter()
+        self._render()
+
     def _render(self) -> None:
         if self.disable:
             return
@@ -137,6 +144,8 @@ def create_progress_bar(
     desc: str = "ArXiv-to-Code",
     unit: str = "step",
     disable: bool = False,
+    unit_scale: bool = False,
+    unit_divisor: int = 1000,
 ) -> Any:
     """Creates a live `tqdm` percentage progress bar (with automatic clean fallback)."""
     if _RealTqdm is not None:
@@ -144,6 +153,8 @@ def create_progress_bar(
             total=max(1, int(total)),
             desc=desc,
             unit=unit,
+            unit_scale=unit_scale,
+            unit_divisor=unit_divisor,
             disable=disable,
             file=sys.stderr,
             ascii=True,
