@@ -66,6 +66,7 @@ class _LazyMCPServerRegistry:
 
 _MCPServerClass = _LazyMCPServerRegistry
 
+from .dream_rsi_engine import run_dream_rsi_rl_optimization as _run_dream_rsi_rl_impl
 from .dynarot import DynaRotModelRouter
 from .evolve_engine import run_combined_shinka_openevolve
 from .langextract_engine import (
@@ -334,6 +335,8 @@ async def generate_python_code_from_paper(
     evolve: bool = False,
     evolve_mode: str = "hybrid",
     generations: int = 4,
+    use_rl: bool = False,
+    rl_cycles: int = 3,
     verify_llm: bool = False,
     verify_model: str = "",
 ) -> str:
@@ -341,7 +344,8 @@ async def generate_python_code_from_paper(
     Fetch an arXiv paper by ID (e.g. '2608.15888' or '2603.02277'), run Google LangExtract
     3-class character-interval source grounding, synthesize complete production Python code
     with `# EVOLVE-BLOCK-START` / `# EVOLVE-BLOCK-END` markers and unit tests, optionally
-    evolve it with ShinkaEvolve + OpenEvolve, and optionally verify it with an LLM judge.
+    evolve it with ShinkaEvolve + OpenEvolve, optionally optimize with Dream-RSI RL (`use_rl=True`),
+    and optionally verify it with an LLM judge.
     """
     try:
         clean_id = normalize_arxiv_id(arxiv_id)
@@ -374,18 +378,39 @@ async def generate_python_code_from_paper(
                 dynarot_decision=dynarot_decision,
             )
 
-        verification_report = None
-        if verify_llm:
-            target_code = (
+        rl_report = None
+        if use_rl:
+            rl_seed = (
                 evolution_report["champion_candidate"]["source_code"]
                 if evolution_report is not None
                 else code_bundle["production_python_code"]
             )
+            rl_raw = _run_dream_rsi_rl_impl(
+                seed_python_code=rl_seed,
+                arxiv_id=clean_id,
+                rl_cycles=max(1, int(rl_cycles)),
+                rl_budget=10,
+                dream_candidates=18,
+                use_llm_dreaming=False,
+                benchmark_seeds=5,
+                dynarot_decision=dynarot_decision,
+                show_progress=False,
+            )
+            rl_report = {k: v for k, v in rl_raw.items() if k != "replay_worlds_serialized"}
+
+        verification_report = None
+        if verify_llm:
+            cands = [(0.0, "synthesized", code_bundle["production_python_code"])]
+            if evolution_report is not None:
+                cands.append((float(evolution_report["champion_metrics"]["total_fitness"]), "evolved_champion", evolution_report["champion_candidate"]["source_code"]))
+            if rl_report is not None:
+                cands.append((float(rl_report["champion_metrics"]["total_fitness"]), "rl_dream_rsi_champion", rl_report["champion_candidate"]["source_code"]))
+            _, stage_label, target_code = max(cands, key=lambda x: x[0])
             verification_report = _verify_generated_python_code_impl(
                 source_code=target_code,
                 paper=paper,
                 extractions=extractions,
-                code_stage="evolved_champion" if evolution_report is not None else "synthesized",
+                code_stage=stage_label,
                 model_id=verify_model.strip() or None,
                 dynarot_decision=dynarot_decision,
                 enable_llm=True,
@@ -401,6 +426,7 @@ async def generate_python_code_from_paper(
                 "grounded_extractions": extractions,
                 "generated_python_code": code_bundle,
                 "evolution_report": evolution_report,
+                "rl_report": rl_report,
                 "verification_report": verification_report,
                 "printable_code_bundle_markdown": code_bundle["printable_code_bundle_markdown"],
             },
@@ -593,6 +619,55 @@ async def verify_generated_python_code(
         return json.dumps({"error": str(exc), "arxiv_id": arxiv_id}, indent=2)
 
 
+# =============================================================================
+# Tool 10: optimize_code_with_dream_rsi_rl
+# =============================================================================
+
+@server.tool()
+async def optimize_code_with_dream_rsi_rl(
+    arxiv_id: str = "2608.15888",
+    python_source_code: str = "",
+    rl_cycles: int = 3,
+    rl_budget: int = 12,
+    dream_candidates: int = 24,
+    use_llm_dreaming: bool = False,
+    benchmark_seeds: int = 7,
+    trace_pool_dir: str = "",
+) -> str:
+    """
+    Runs Dream-RSI Reinforcement Learning Recursive Self-Improvement (arXiv:2609.14858)
+    over generated Python code: builds real online DiscoveryTree rollouts, converts them
+    into frozen zero-cost Replay Worlds, optimizes meta-exploration policies offline via
+    dreaming, and reports a standardized 5-baseline 95% Student-t CI empirical benchmark
+    (Disabled, Random, Heuristic, NoLearning, DreamRSI_Learned) with explicit backend labeling.
+    """
+    try:
+        clean_id = normalize_arxiv_id(arxiv_id) or "2608.15888"
+        if not python_source_code.strip():
+            paper = fetch_paper_by_id(clean_id)
+            if not paper:
+                return json.dumps({"error": f"Paper not found for arXiv ID: {clean_id}"}, indent=2)
+            extractions, _ = extract_grounded_breakouts(paper)
+            bundle = synthesize_production_python_code(paper, extractions)
+            python_source_code = bundle["production_python_code"]
+
+        report = _run_dream_rsi_rl_impl(
+            seed_python_code=python_source_code,
+            arxiv_id=clean_id,
+            rl_cycles=max(1, int(rl_cycles)),
+            rl_budget=max(2, int(rl_budget)),
+            dream_candidates=max(6, int(dream_candidates)),
+            use_llm_dreaming=bool(use_llm_dreaming),
+            benchmark_seeds=max(3, int(benchmark_seeds)),
+            trace_pool_dir=trace_pool_dir.strip() or None,
+            show_progress=False,
+        )
+        clean_report = {k: v for k, v in report.items() if k != "replay_worlds_serialized"}
+        return json.dumps(clean_report, indent=2)
+    except Exception as exc:
+        return json.dumps({"error": str(exc), "arxiv_id": arxiv_id}, indent=2)
+
+
 def build_mcp_arg_parser() -> "argparse.ArgumentParser":
     import argparse
 
@@ -601,27 +676,29 @@ def build_mcp_arg_parser() -> "argparse.ArgumentParser":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "ArXiv-to-Code Universal MCP Server (stdio JSON-RPC 2.0)\n"
-            "Exposes 9 specialized tools for arXiv search, 3-class Google LangExtract character-span\n"
+            "Exposes 10 specialized tools for arXiv search, 3-class Google LangExtract character-span\n"
             "grounding, Paper-to-Python code synthesis, ModelFusion DynaRot hardware-aware routing,\n"
-            "combined ShinkaEvolve + OpenEvolve evolutionary search, and LLM-based code verification."
+            "combined ShinkaEvolve + OpenEvolve evolutionary search, Dream-RSI RL optimization,\n"
+            "and LLM/Panel code verification."
         ),
         epilog=(
-            "Registered MCP Tools (9 Tools):\n"
+            "Registered MCP Tools (10 Tools):\n"
             "  1. arxiv_to_code_status              : Health, versions, active DynaRot tier & ranking weights\n"
             "  2. dynarot_hardware_route_and_install: Live free RAM/VRAM probe, Pareto knee-point & ollama pull\n"
             "  3. search_and_rank_arxiv_papers      : Search arXiv, 3-class LangExtract grounding & Python codegen\n"
             "  4. extract_document_langextract      : Extract CharInterval spans from arXiv ID or local PDF/text + HTML\n"
-            "  5. generate_python_code_from_paper   : Synthesize EVOLVE-BLOCK Python module from arXiv ID (+ evolve)\n"
+            "  5. generate_python_code_from_paper   : Synthesize EVOLVE-BLOCK Python module from arXiv ID (+ evolve/RL)\n"
             "  6. evolve_python_code                : Run ShinkaEvolve + OpenEvolve (sequential | parallel | hybrid)\n"
             "  7. audit_defense_coverage            : Audit paper vectors across Python & multi-ring boundaries\n"
             "  8. run_langgraph_arxiv_to_code_swarm : Execute 4-Arm HMAC-SHA256 signed StateGraph Research Swarm\n"
-            "  9. verify_generated_python_code      : Verify generated Python code via Deterministic Gate + LLM Judge\n"
+            "  9. verify_generated_python_code      : Verify generated Python code via Deterministic Gate + LLM/Panel\n"
+            " 10. optimize_code_with_dream_rsi_rl   : Dream-RSI RL (Evolving Replay Worlds + Offline Dreaming + 95% CI)\n"
         ),
     )
     parser.add_argument(
         "--list-tools",
         action="store_true",
-        help="Print JSON catalog of all 9 registered MCP tools and exit",
+        help="Print JSON catalog of all 10 registered MCP tools and exit",
     )
     parser.add_argument(
         "-V",
@@ -647,12 +724,13 @@ def main(argv: Optional[List[str]] = None) -> None:
             {"name": "audit_defense_coverage", "description": audit_defense_coverage.__doc__.strip()},
             {"name": "run_langgraph_arxiv_to_code_swarm", "description": run_langgraph_arxiv_to_code_swarm.__doc__.strip()},
             {"name": "verify_generated_python_code", "description": verify_generated_python_code.__doc__.strip()},
+            {"name": "optimize_code_with_dream_rsi_rl", "description": optimize_code_with_dream_rsi_rl.__doc__.strip()},
         ]
-        print(json.dumps({"server": "arxiv-to-code", "total_tools": 9, "tools": tools_catalog}, indent=2))
+        print(json.dumps({"server": "arxiv-to-code", "total_tools": 10, "tools": tools_catalog}, indent=2))
         return
 
     sys.stderr.write(
-        "Starting ArXiv-to-Code + Google LangExtract + ModelFusion DynaRot + ShinkaEvolve/OpenEvolve + LLM Verifier MCP Server on stdio (9 Tools Registered)...\n"
+        "Starting ArXiv-to-Code + Google LangExtract + ModelFusion DynaRot + ShinkaEvolve/OpenEvolve + Dream-RSI RL + Panel Verifier MCP Server on stdio (10 Tools Registered)...\n"
     )
     sys.stderr.flush()
     server.run(transport="stdio")

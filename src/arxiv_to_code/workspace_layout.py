@@ -59,6 +59,7 @@ def prepare_paper_workspace(
     eval_dir = paper_dir / "eval"
     evolved_dir = paper_dir / "evolved"
     elites_dir = evolved_dir / "elites"
+    rl_dir = paper_dir / "rl"
 
     for d in (paper_dir, src_dir, eval_dir):
         d.mkdir(parents=True, exist_ok=True)
@@ -70,6 +71,7 @@ def prepare_paper_workspace(
         "eval_dir": eval_dir,
         "evolved_dir": evolved_dir,
         "elites_dir": elites_dir,
+        "rl_dir": rl_dir,
         "folder_name": Path(folder_name),
     }
 
@@ -83,6 +85,7 @@ def write_organized_paper_artifacts(
     evolution_report: Optional[Dict[str, Any]] = None,
     dynarot_decision: Optional[Dict[str, Any]] = None,
     verification_report: Optional[Dict[str, Any]] = None,
+    rl_report: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, str]:
     """
     Writes all organized paper artifacts (`src/`, `eval/`, `evolved/`, `metadata.json`,
@@ -130,7 +133,42 @@ def write_organized_paper_artifacts(
         evo_json_path.write_text(json.dumps(evolution_report, indent=2), encoding="utf-8")
         evo_report_path_str = str(evo_json_path)
 
-    # 3b. Save LLM + Deterministic verification report if --verify-llm ran
+    # 3b. Save Dream-RSI RL optimization report, champion, promoted policy & replay worlds if --rl ran
+    rl_champion_path_str = ""
+    rl_report_path_str = ""
+    rl_policy_path_str = ""
+    rl_trace_pool_path_str = ""
+    if rl_report is not None:
+        rl_dir = paths["rl_dir"]
+        rl_dir.mkdir(parents=True, exist_ok=True)
+
+        rl_champ_dest = rl_dir / f"rl_champion_arxiv_{id_slug}.py"
+        rl_champ_src = rl_report.get("champion_candidate", {}).get("source_code", "")
+        if rl_champ_src:
+            rl_champ_dest.write_text(rl_champ_src, encoding="utf-8")
+            rl_champion_path_str = str(rl_champ_dest)
+
+        rl_policy_dest = rl_dir / "promoted_policy.json"
+        rl_policy_dest.write_text(json.dumps(rl_report.get("promoted_policy", {}), indent=2), encoding="utf-8")
+        rl_policy_path_str = str(rl_policy_dest)
+
+        rl_trace_dest = rl_dir / "trace_pool.jsonl"
+        worlds_raw = rl_report.get("replay_worlds_serialized") or []
+        if worlds_raw:
+            with rl_trace_dest.open("w", encoding="utf-8") as tf:
+                for w in worlds_raw:
+                    tf.write(json.dumps(w) + "\n")
+            rl_trace_pool_path_str = str(rl_trace_dest)
+
+        rl_report_clean = {k: v for k, v in rl_report.items() if k != "replay_worlds_serialized"}
+        rl_report_clean["champion_file_path"] = rl_champion_path_str
+        rl_report_clean["promoted_policy_path"] = rl_policy_path_str
+        rl_report_clean["trace_pool_jsonl_path"] = rl_trace_pool_path_str
+        rl_json_path = rl_dir / "rl_report.json"
+        rl_json_path.write_text(json.dumps(rl_report_clean, indent=2), encoding="utf-8")
+        rl_report_path_str = str(rl_json_path)
+
+    # 3c. Save LLM + Deterministic verification report if --verify-llm / --verify-panel ran
     verification_report_path_str = ""
     if verification_report is not None:
         ver_json_path = paper_dir / "verification_report.json"
@@ -162,6 +200,19 @@ def write_organized_paper_artifacts(
             if verification_report is not None
             else {}
         ),
+        "rl_summary": (
+            {
+                "environment_backend": rl_report.get("environment_backend"),
+                "rl_cycles": rl_report.get("rl_cycles"),
+                "champion_fitness": rl_report.get("champion_metrics", {}).get("total_fitness"),
+                "speedup_ratio": rl_report.get("speedup_ratio"),
+                "promoted_policy_id": rl_report.get("promoted_policy", {}).get("policy_id"),
+                "worlds_count": rl_report.get("replay_world_pool_summary", {}).get("final_worlds_count"),
+                "outperforms_all_baselines": rl_report.get("empirical_benchmark_95ci", {}).get("outperforms_all_baselines"),
+            }
+            if rl_report is not None
+            else {}
+        ),
         "artifacts": {
             "python_module": str(module_path),
             "evaluator_script": str(scorer_path),
@@ -169,6 +220,10 @@ def write_organized_paper_artifacts(
             "langextract_jsonl": lx_paths["jsonl_path"],
             "evolved_champion": champion_path_str,
             "evolution_report": evo_report_path_str,
+            "rl_champion": rl_champion_path_str,
+            "rl_report": rl_report_path_str,
+            "rl_policy": rl_policy_path_str,
+            "rl_trace_pool": rl_trace_pool_path_str,
             "verification_report": verification_report_path_str,
         },
         "generated_at_epoch": round(time.time(), 2),
@@ -190,6 +245,27 @@ def write_organized_paper_artifacts(
             f"- **Speedup Ratio**: `{evolution_report.get('speedup_ratio', 1.0)}x`\n"
             f"- **Occupied MAP-Elites Niches**: `{evolution_report['openevolve_map_elites_summary']['occupied_niches_count']}/16`\n"
             f"- **Run Champion Directly**:\n  ```powershell\n  python \"{champion_path_str}\"\n  ```\n\n"
+        )
+
+    rl_section = ""
+    if rl_report is not None:
+        rl_base = rl_report["baseline_seed_metrics"]
+        rl_champ = rl_report["champion_metrics"]
+        rl_bench = rl_report.get("empirical_benchmark_95ci", {})
+        rl_pol = rl_report.get("promoted_policy", {})
+        rl_section = (
+            "## Dream-RSI Reinforcement Learning Optimization (`--rl` / `arXiv:2609.14858`)\n"
+            f"- **Environment Backend**: `{rl_report.get('environment_backend', 'native_dream_rsi_replay_world_model')}`\n"
+            f"- **RSI Cycles / Replay Worlds**: `{rl_report.get('rl_cycles', 0)}` cycles | "
+            f"`{rl_report.get('replay_world_pool_summary', {}).get('final_worlds_count', 0)}` frozen replay worlds\n"
+            f"- **Baseline -> RL Champion Fitness**: `{rl_base['total_fitness']}/100` -> `{rl_champ['total_fitness']}/100` "
+            f"(`{rl_report.get('speedup_ratio', 1.0)}x` speedup, `{rl_champ['execution_time_us']} us`, `{rl_champ['peak_memory_kib']} KiB`)\n"
+            f"- **Promoted Meta-Policy**: `{rl_pol.get('policy_id', '')}` (`{rl_pol.get('policy_origin', '')}`, "
+            f"`c={rl_pol.get('uct_exploration_c')}`, `batch={rl_pol.get('parallel_batch_width')}`, `patience={rl_pol.get('early_stop_patience')}`)\n"
+            f"- **Empirical Superiority (95% CI vs Disabled/Random/Heuristic/NoLearning)**: "
+            f"`outperforms_all_baselines={rl_bench.get('outperforms_all_baselines', False)}` | "
+            f"`deltas={rl_bench.get('superiority_deltas', {})}`\n"
+            f"- **Run RL Champion Directly**:\n  ```powershell\n  python \"{rl_champion_path_str}\"\n  ```\n\n"
         )
 
     verify_section = ""
@@ -243,9 +319,17 @@ def write_organized_paper_artifacts(
             if evolution_report is not None
             else ""
         )
+        + (
+            f"- [`rl/rl_champion_arxiv_{id_slug}.py`](rl/rl_champion_arxiv_{id_slug}.py) — Dream-RSI RL optimized champion module\n"
+            "- [`rl/rl_report.json`](rl/rl_report.json) — Dream-RSI cycles, promoted policy & 5-baseline 95% CI benchmark\n"
+            "- [`rl/trace_pool.jsonl`](rl/trace_pool.jsonl) — Frozen Dream-RSI Replay Worlds archive\n"
+            if rl_report is not None
+            else ""
+        )
         + "\n## How to Run\n"
         f"```powershell\npython \"{module_path}\"\n```\n\n"
         + evo_section
+        + rl_section
         + verify_section
         + "## Google LangExtract Grounded Spans\n"
         + spans_md
@@ -284,6 +368,15 @@ def write_organized_paper_artifacts(
         "champion_module": (
             f"{rel_folder}/evolved/champion_arxiv_{id_slug}.py" if evolution_report else ""
         ),
+        "rl_enabled": rl_report is not None,
+        "rl_backend": rl_report.get("environment_backend") if rl_report else "",
+        "rl_champion_fitness": (
+            rl_report["champion_metrics"]["total_fitness"] if rl_report else None
+        ),
+        "rl_speedup_ratio": rl_report.get("speedup_ratio") if rl_report else None,
+        "rl_champion_module": (
+            f"{rel_folder}/rl/rl_champion_arxiv_{id_slug}.py" if rl_report else ""
+        ),
         "verified": verification_report is not None,
         "verification_verdict": verification_report.get("verdict") if verification_report else None,
         "verification_score": verification_report.get("overall_score") if verification_report else None,
@@ -305,8 +398,8 @@ def write_organized_paper_artifacts(
         "",
         "This directory is automatically organized by `arixv_to_code.py`. Each paper has its own subfolder containing `src/`, `eval/`, `langextract_report.html`, `extraction_results.jsonl`, `metadata.json`, `README.md`, and (when enabled) `evolved/` and `verification_report.json`.",
         "",
-        "| arXiv ID | Score | Title | Folder | Python Module | Evolved Champion | Speedup | Verification | LangExtract HTML |",
-        "|:---|:---:|:---|:---|:---|:---|:---:|:---:|:---|",
+        "| arXiv ID | Score | Title | Folder | Python Module | Evolved Champion | Dream-RSI RL | Speedup | Verification | LangExtract HTML |",
+        "|:---|:---:|:---|:---|:---|:---|:---|:---:|:---:|:---|",
     ]
     for pid, entry in sorted(
         manifest["papers"].items(),
@@ -319,7 +412,13 @@ def write_organized_paper_artifacts(
             if entry.get("evolved") and entry.get("champion_module")
             else "—"
         )
-        spd_cell = f"{entry['speedup_ratio']}x" if entry.get("speedup_ratio") else "—"
+        rl_cell = (
+            f"[`rl_champ`]({entry['rl_champion_module']}) ({entry['rl_champion_fitness']}/100)"
+            if entry.get("rl_enabled") and entry.get("rl_champion_module")
+            else "—"
+        )
+        spd_val = entry.get("rl_speedup_ratio") or entry.get("speedup_ratio")
+        spd_cell = f"{spd_val}x" if spd_val else "—"
         if entry.get("verified") and entry.get("verification_report"):
             v_tag = "Panel+Det" if entry.get("panel_verified") else ("LLM+Det" if entry.get("llm_verified") else "Det")
             ver_cell = (
@@ -331,7 +430,7 @@ def write_organized_paper_artifacts(
         index_lines.append(
             f"| `{entry['arxiv_id']}` | `{entry['rank_score']}/100` | {t_short} | "
             f"[`{entry['folder']}/`]({entry['folder']}/README.md) | "
-            f"[`module`]({entry['python_module']}) | {champ_cell} | {spd_cell} | {ver_cell} | "
+            f"[`module`]({entry['python_module']}) | {champ_cell} | {rl_cell} | {spd_cell} | {ver_cell} | "
             f"[`HTML`]({entry['langextract_html']}) |"
         )
 
@@ -349,6 +448,10 @@ def write_organized_paper_artifacts(
         "paper_readme": str(readme_path),
         "evolved_champion": champion_path_str,
         "evolution_report": evo_report_path_str,
+        "rl_champion": rl_champion_path_str,
+        "rl_report": rl_report_path_str,
+        "rl_policy": rl_policy_path_str,
+        "rl_trace_pool": rl_trace_pool_path_str,
         "verification_report": verification_report_path_str,
         "manifest_json": str(manifest_path),
         "index_md": str(index_path),

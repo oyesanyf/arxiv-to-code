@@ -23,7 +23,7 @@ The **ArXiv-to-Code MCP Server** (`mcp_server.py` or `python arixv_to_code.py --
 
 ---
 
-## 2. Complete 9-Tool Reference Catalog
+## 2. Complete 10-Tool Reference Catalog
 
 ### Tool 1: `arxiv_to_code_status`
 Returns server health, Python/LangExtract/arXiv package versions, active ModelFusion DynaRot hardware tier and model split, ranking factor weights, and novelty blacklist.
@@ -105,3 +105,15 @@ Verifies generated or evolved Python code against the arXiv paper's grounded spa
   - `panel_models` (`str`, default: `""` — optional comma-separated Ollama panelist list)
   - `panel_mode` (`str`, default: `"multi-model"` — `"multi-model"` or `"multi-sample"`)
   - `auto_provision` (`bool`, default: `False` — automatically installs/starts Ollama and pulls missing resource-fitted models before verification)
+
+### Tool 10: `optimize_code_with_dream_rsi_rl`
+Runs **Dream-RSI Reinforcement Learning** (`arXiv:2609.14858`) over generated Python code: builds real online `DiscoveryTree` rollouts, converts them into frozen zero-cost Replay Worlds, optimizes meta-exploration policies offline via dreaming, explicitly labels the active backend (`official_google_research_dream_rsi` vs. `native_dream_rsi_replay_world_model`), and returns a 5-baseline matched-seed 95% Student-$t$ CI empirical superiority benchmark.
+- **Arguments**:
+  - `arxiv_id` (`str`, default: `"2608.15888"`)
+  - `python_source_code` (`str`, default: `""` — auto-synthesizes from `arxiv_id` if omitted)
+  - `rl_cycles` (`int`, default: `3`)
+  - `rl_budget` (`int`, default: `12`)
+  - `dream_candidates` (`int`, default: `24`)
+  - `use_llm_dreaming` (`bool`, default: `False`)
+  - `benchmark_seeds` (`int`, default: `7`)
+  - `trace_pool_dir` (`str`, default: `""`)

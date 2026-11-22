@@ -9,8 +9,9 @@
   <img src="https://img.shields.io/badge/LangExtract-3--Class%20CharInterval%20Grounding-10b981?style=for-the-badge" alt="Google LangExtract" />
   <img src="https://img.shields.io/badge/ModelFusion-DynaRot%20Pareto%20%2B%20UCB1-8b5cf6?style=for-the-badge" alt="ModelFusion DynaRot" />
   <img src="https://img.shields.io/badge/Evolution-ShinkaEvolve%20%2B%20OpenEvolve-f59e0b?style=for-the-badge" alt="ShinkaEvolve + OpenEvolve" />
-  <img src="https://img.shields.io/badge/Verifier-Deterministic%20AST%20%2B%20LLM%20Judge-ef4444?style=for-the-badge" alt="LLM Code Verifier" />
-  <img src="https://img.shields.io/badge/MCP%20Server-9%20Tools%20%7C%20JSON--RPC%202.0-06b6d4?style=for-the-badge" alt="MCP Server" />
+  <img src="https://img.shields.io/badge/RL-Dream--RSI%20Evolving%20Worlds-ec4899?style=for-the-badge" alt="Dream-RSI RL" />
+  <img src="https://img.shields.io/badge/Verifier-Deterministic%20AST%20%2B%20Panel%20LLM-ef4444?style=for-the-badge" alt="Panel LLM Code Verifier" />
+  <img src="https://img.shields.io/badge/MCP%20Server-10%20Tools%20%7C%20JSON--RPC%202.0-06b6d4?style=for-the-badge" alt="MCP Server" />
 </p>
 
 ---
@@ -102,9 +103,14 @@ generated/
     ├── eval/
     │   └── evaluate_arxiv_2603_02277.py  # Standalone deterministic evaluator
     └── evolved/                          # Created when --evolves is active
-        ├── champion_arxiv_2603_02277.py  # Best evolved champion across all --evolve-count rounds
-        ├── evolution_report.json         # Full ShinkaEvolve + OpenEvolve MAP-Elites metrics & round history
-        └── elites/                       # Individual ShinkaEvolve & OpenEvolve island elite files
+    │   ├── champion_arxiv_2603_02277.py  # Best evolved champion across all --evolve-count rounds
+    │   ├── evolution_report.json         # Full ShinkaEvolve + OpenEvolve MAP-Elites metrics & round history
+    │   └── elites/                       # Individual ShinkaEvolve & OpenEvolve island elite files
+    └── rl/                               # Created when --rl / --dream-rsi is active (arXiv:2609.14858)
+        ├── rl_champion_arxiv_2603_02277.py # Dream-RSI RL optimized champion module
+        ├── rl_report.json                # RSI cycles, promoted policy & 5-baseline 95% CI empirical benchmark
+        ├── promoted_policy.json          # Serialized winning meta-exploration policy
+        └── trace_pool.jsonl              # Frozen DiscoveryTree Replay Worlds (reusable across runs)
 ```
 
 ### Complete Flag Combination Matrix (`arixv_to_code.py`)
@@ -121,6 +127,8 @@ generated/
 | **Extract local PDF / Markdown / Text + Interactive LangExtract HTML + Evolve** | `python arixv_to_code.py --extract-doc .\paper.pdf --html-report .\langextract_audit.html --evolves --output-dir .\out_doc` |
 | **Specific arXiv ID + Interactive LangExtract HTML Report** | `python arixv_to_code.py --arxiv-id 2603.02277 --html-report .\audit_2603_02277.html --generate --output-dir .\out_html` |
 | **ModelFusion DynaRot Hardware Sizing & Compute Split** | `python arixv_to_code.py --dynarot` |
+| **Specific arXiv ID + Dream-RSI RL (`arXiv:2609.14858`) + 5-Baseline 95% CI Benchmark** | `python arixv_to_code.py --arxiv-id 2608.15888 --rl --rl-cycles 3 --rl-budget 12 --rl-benchmark` |
+| **Dream-RSI RL with Local Ollama LLM Dreaming (`--rl-llm`) + ModelFusion Panel Verify** | `python arixv_to_code.py --arxiv-id 2608.15888 --rl --rl-llm --verify-panel --panel-size 2` |
 | **Auto-Install Ollama & Dynamically Pull Resource-Fitted Models (`glm4:9b` + `deepseek-r1:7b`)** | `python arixv_to_code.py --install-models` |
 | **Auto-Provision Missing Models On-Demand + Hybrid Evolve + Panel Verify** | `python arixv_to_code.py --arxiv-id 2608.15888 --auto-provision --langextract-llm --evolves --evolve-count 2 --verify-panel` |
 | **Multi-Target Defense Coverage Audit** | `python arixv_to_code.py --arxiv-id 2603.02277 --audit` |
@@ -143,7 +151,7 @@ python .\generated\arxiv_2603_02277_quantifying_frontier_llm\evolved\champion_ar
 
 ---
 
-## 🔌 Universal MCP Server (9 Tools)
+## 🔌 Universal MCP Server (10 Tools)
 
 Start the stdio JSON-RPC 2.0 MCP server:
 ```powershell
@@ -174,4 +182,5 @@ Add to your IDE `mcp.json`:
 | 6 | `evolve_python_code` | Run `evolve_count` rounds of combined `ShinkaEvolve` + `OpenEvolve` (`sequential`, `parallel`, or `hybrid`) on Python code. |
 | 7 | `audit_defense_coverage` | Audit paper vectors and synthesized Python code across multi-ring containment boundaries. |
 | 8 | `run_langgraph_arxiv_to_code_swarm` | Execute the 4-Arm HMAC-SHA256 signed StateGraph Research & Evolution Swarm. |
-| 9 | `verify_generated_python_code` | Fail-closed Deterministic AST/Runtime Gate + Open-Weight LLM-as-a-Judge auditing paper fidelity, correctness, and security. |
+| 9 | `verify_generated_python_code` | Fail-closed Deterministic AST/Runtime Gate + Open-Weight LLM / ModelFusion Panel-of-Models verification. |
+| 10 | `optimize_code_with_dream_rsi_rl` | Dream-RSI Reinforcement Learning (`arXiv:2609.14858`): evolving Replay Worlds, zero-cost offline dreaming & 5-baseline 95% CI benchmark. |

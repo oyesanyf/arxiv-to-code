@@ -225,9 +225,10 @@ def test_flag_09_audit_and_langgraph_and_status_and_list_tools(capsys) -> None:
     # --list-tools
     assert cli_main(["--list-tools"]) == 0
     out_tools = json.loads(capsys.readouterr().out)
-    assert out_tools["total_tools"] == 9
+    assert out_tools["total_tools"] == 10
     tool_names = {t["name"] for t in out_tools["tools"]}
     assert "verify_generated_python_code" in tool_names
+    assert "optimize_code_with_dream_rsi_rl" in tool_names
 
 
 def test_flag_10_self_test_flag() -> None:

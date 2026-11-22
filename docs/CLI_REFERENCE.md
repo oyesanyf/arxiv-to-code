@@ -39,6 +39,14 @@ The **ArXiv-to-Code All-in-One CLI** (`python arixv_to_code.py`) provides single
 | `--generations` | `int` | `4` | Number of evolutionary generations per stage inside each round. |
 | `--islands` | `int` | `3` | Number of `OpenEvolve` MAP-Elites islands for behavioral niche exploration. |
 | `--elites-dir` | `str` | `None` | Shared filesystem directory for cross-pollinated elites between `ShinkaEvolve` and `OpenEvolve`. |
+| `--rl`, `--dream-rsi`, `--use-rl`, `--rl-evolve` | `flag` | `False` | Activate **Dream-RSI Reinforcement Learning** (`arXiv:2609.14858`): builds online `DiscoveryTree` rollouts over real code evaluations, converts them into frozen zero-cost Replay Worlds (`trace_pool.jsonl`), dreams candidate meta-exploration policies offline, promotes the winner, and verifies empirical superiority with 5-baseline 95% Student-$t$ CIs. |
+| `--rl-cycles` | `int` | `3` | Number of outer Dream-RSI recursive self-improvement cycles (`explore -> pool -> dream -> promote`). |
+| `--rl-budget` | `int` | `12` | Online candidate code evaluation budget per Dream-RSI cycle. |
+| `--rl-dream-candidates` | `int` | `24` | Number of candidate meta-exploration policies evaluated offline per dreaming phase (zero live code executions). |
+| `--rl-llm` | `flag` | `False` | Enable local Ollama LLM meta-policy rewriting (`glm4:9b` / `deepseek-r1:7b`) during Dream-RSI offline dreaming. |
+| `--rl-benchmark` | `flag` | `False` | Print the full 5-baseline matched-seed 95% Student-$t$ CI table (`Disabled`, `Random`, `Heuristic`, `NoLearning`, `DreamRSI_Learned`). |
+| `--rl-seeds` | `int` | `7` | Number of matched episode seeds for the 95% Student-$t$ CI empirical benchmark. |
+| `--rl-trace-pool` | `str` | `None` | Optional persistent directory for `trace_pool.jsonl` so Replay Worlds accumulate across papers and sessions. |
 | `--langgraph`, `--swarm` | `flag` | `False` | Execute the 4-Arm HMAC-SHA256 signed StateGraph Research & Evolution Swarm. |
 | `--status` | `flag` | `False` | Print full JSON status report of ArXiv-to-Code, LangExtract, DynaRot, and ShinkaEvolve/OpenEvolve. |
 | `--list-tools`, `--mcp-tools` | `flag` | `False` | Print JSON catalog of all 9 registered Universal MCP Server tools and exit. |

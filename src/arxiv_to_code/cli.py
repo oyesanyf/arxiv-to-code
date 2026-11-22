@@ -27,6 +27,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+from .dream_rsi_engine import run_dream_rsi_rl_optimization
 from .dynarot import DynaRotModelRouter, size_models_by_available_memory
 from .evolve_engine import evaluate_python_candidate, run_combined_shinka_openevolve
 from .langextract_engine import (
@@ -112,7 +113,10 @@ EXECUTABLE CLI EXAMPLES (ALL FLAGS VIA python arixv_to_code.py)
   # 11. Generate, evolve (x2 rounds), and verify generated Python code using a local open-weight LLM
   python arixv_to_code.py --search "LLM container sandbox escape" --max-results 2 --evolves --evolve-count 2 --verify-llm
 
-  # 12. List all 9 registered MCP tools or start the stdio JSON-RPC MCP server
+  # 12. Optimize generated Python code via Dream-RSI RL (arXiv:2609.14858) + 5-baseline 95% CI benchmark + Panel Verify
+  python arixv_to_code.py --arxiv-id 2608.15888 --rl --rl-cycles 3 --rl-budget 12 --rl-benchmark --verify-panel
+
+  # 13. List all 10 registered MCP tools or start the stdio JSON-RPC MCP server
   python arixv_to_code.py --list-tools
   python arixv_to_code.py --mcp
 """
@@ -149,6 +153,10 @@ def normalize_cli_argv(argv: Optional[List[str]]) -> List[str]:
         "--provision": "--install-models",
         "--install-ollama": "--install-models",
         "--pull-models": "--install-models",
+        "--dream-rsi": "--rl",
+        "--dreamrsi": "--rl",
+        "--use-rl": "--rl",
+        "--rl-evolve": "--rl",
     }
     for token in raw_list:
         if token.startswith("---"):
@@ -167,7 +175,7 @@ def normalize_cli_argv(argv: Optional[List[str]]) -> List[str]:
 
 def run_self_test() -> bool:
     """
-    Comprehensive 9-step end-to-end functional self-test verifying:
+    Comprehensive 10-step end-to-end functional self-test verifying:
     1. arXiv discovery & strict novelty filtering
     2. Google LangExtract 3-class character-interval source grounding
     3. Multi-factor 0-100 ranking & code repo bonus
@@ -177,13 +185,14 @@ def run_self_test() -> bool:
     7. Combined ShinkaEvolve + OpenEvolve (`--evolves`) sequential & parallel cross-pollination
     8. 4-Arm HMAC-SHA256 signed LangGraph Research & Evolutionary Swarm
     9. Deterministic + LLM-as-a-Judge Generated Code Verification Gate
+    10. Dream-RSI RL (Evolving Replay Worlds + Offline Dreaming + 5-Baseline 95% CI Benchmark)
     """
     print("================================================================================")
-    print("[ARIXV-TO-CODE] 9-STEP END-TO-END FUNCTIONAL SELF-TEST SUITE")
+    print("[ARIXV-TO-CODE] 10-STEP END-TO-END FUNCTIONAL SELF-TEST SUITE")
     print("================================================================================")
 
     # 1. Test arXiv discovery & novelty-filtered ranking
-    print("[1/9] Testing arXiv discovery & strict novelty-filtered article ranking...")
+    print("[1/10] Testing arXiv discovery & strict novelty-filtered article ranking...")
     ranked = search_and_rank_articles(
         query="LLM container sandbox escape jailbreak",
         max_results=3,
@@ -201,7 +210,7 @@ def run_self_test() -> bool:
         )
 
     # 2. Test 3-class Google LangExtract source grounding on arXiv:2603.02277
-    print("[2/9] Testing Google LangExtract 3-class character-span grounding on arXiv:2603.02277...")
+    print("[2/10] Testing Google LangExtract 3-class character-span grounding on arXiv:2603.02277...")
     paper = fetch_paper_by_id("2603.02277")
     assert paper is not None
     extractions, annotated_doc = extract_grounded_breakouts(paper)
@@ -215,7 +224,7 @@ def run_self_test() -> bool:
     print(f"  [PASS] Verified {len(extractions)} exact character-interval spans (Score: {rank_data['total_score']}/100)")
 
     # 3. Verify strict novelty rejection of already-implemented papers (2610.09167)
-    print("[3/9] Verifying strict novelty rejection of already-implemented paper (arXiv:2610.09167)...")
+    print("[3/10] Verifying strict novelty rejection of already-implemented paper (arXiv:2610.09167)...")
     impl_paper = fetch_paper_by_id("2610.09167")
     assert impl_paper is not None
     impl_exts, _ = extract_grounded_breakouts(impl_paper)
@@ -225,7 +234,7 @@ def run_self_test() -> bool:
     print("  [PASS] Correctly rejected already-implemented paper 2610.09167 (Novelty Delta: 0.0 pts)")
 
     # 4. Test Interactive HTML Visualization
-    print("[4/9] Testing Google LangExtract interactive HTML report generation...")
+    print("[4/10] Testing Google LangExtract interactive HTML report generation...")
     test_html = Path("test_arxiv_to_code_audit.html")
     generate_interactive_html(annotated_doc, str(test_html))
     assert test_html.exists() and test_html.stat().st_size > 250
@@ -233,7 +242,7 @@ def run_self_test() -> bool:
     print("  [PASS] Generated and verified interactive LangExtract HTML visualization")
 
     # 5. Test ModelFusion DynaRot Dynamic Available Memory Law across all 5 tiers
-    print("[5/9] Testing ModelFusion DynaRot hardware sizing & compute budget split...")
+    print("[5/10] Testing ModelFusion DynaRot hardware sizing & compute budget split...")
     _, p1, s1, o1, _, _ = size_models_by_available_memory(free_ram_gb=64.0, free_vram_mb=24000.0)
     assert p1 == "qwen2.5:32b" and s1 == "qwen2.5:32b" and o1 == "qwen2.5:7b"
     _, p2, s2, o2, _, _ = size_models_by_available_memory(free_ram_gb=28.0, free_vram_mb=15000.0)
@@ -254,7 +263,7 @@ def run_self_test() -> bool:
     )
 
     # 6. Test Paper-to-Python Code Synthesis & Deterministic Execution
-    print("[6/9] Testing Paper-to-Python production code generation & deterministic benchmark...")
+    print("[6/10] Testing Paper-to-Python production code generation & deterministic benchmark...")
     apc_paper = fetch_paper_by_id("2608.15888")
     assert apc_paper is not None
     apc_exts, _ = extract_grounded_breakouts(apc_paper)
@@ -270,7 +279,7 @@ def run_self_test() -> bool:
     )
 
     # 7. Test Combined ShinkaEvolve + OpenEvolve (--evolves) Pipeline
-    print("[7/9] Testing Combined ShinkaEvolve + OpenEvolve evolutionary search (Sequential & Parallel)...")
+    print("[7/10] Testing Combined ShinkaEvolve + OpenEvolve evolutionary search (Sequential & Parallel)...")
     evo_report = run_combined_shinka_openevolve(
         seed_python_code=py_src,
         arxiv_id="2608.15888",
@@ -292,7 +301,7 @@ def run_self_test() -> bool:
     )
 
     # 8. Test 4-Arm HMAC-SHA256 Signed Swarm
-    print("[8/9] Testing 4-Arm HMAC-SHA256 Signed ArXiv-to-Code Swarm...")
+    print("[8/10] Testing 4-Arm HMAC-SHA256 Signed ArXiv-to-Code Swarm...")
     swarm_state = run_langgraph_research_swarm(
         query="LLM agent sandbox escape breakout",
         arxiv_id="2603.02277",
@@ -307,7 +316,7 @@ def run_self_test() -> bool:
     )
 
     # 9. Test LLM + Deterministic Generated Code Verification Gate
-    print("[9/9] Testing Deterministic + LLM Code Verification Gate (valid pass & dangerous code fail-closed)...")
+    print("[9/10] Testing Deterministic + LLM Code Verification Gate (valid pass & dangerous code fail-closed)...")
     ver_ok = verify_generated_python_code(
         source_code=evo_report["champion_candidate"]["source_code"],
         paper=apc_paper,
@@ -330,8 +339,37 @@ def run_self_test() -> bool:
         f"  [PASS] Code Verifier PASS ({ver_ok.overall_score}/100) on valid champion & FAIL-CLOSED on dangerous os.system()"
     )
 
+    # 10. Test Dream-RSI Reinforcement Learning Optimization & 5-Baseline 95% CI Benchmark
+    print("[10/10] Testing Dream-RSI RL (Evolving Replay Worlds + Offline Dreaming + 5-Baseline 95% CI Benchmark)...")
+    rl_res = run_dream_rsi_rl_optimization(
+        seed_python_code=py_src,
+        arxiv_id="2608.15888",
+        rl_cycles=2,
+        rl_budget=8,
+        dream_candidates=12,
+        use_llm_dreaming=False,
+        benchmark_seeds=5,
+        dynarot_decision=live_decision,
+        show_progress=False,
+    )
+    assert rl_res["environment_backend"] in (
+        "native_dream_rsi_replay_world_model",
+        "official_google_research_dream_rsi",
+    )
+    assert rl_res["replay_world_pool_summary"]["final_worlds_count"] == 2
+    assert rl_res["champion_metrics"]["tests_passed"] == rl_res["champion_metrics"]["tests_total"]
+    bench = rl_res["empirical_benchmark_95ci"]
+    for b_key in ("Disabled", "Random", "Heuristic", "NoLearning", "DreamRSI_Learned"):
+        assert b_key in bench["baselines"]
+    print(
+        f"  [PASS] Dream-RSI ({rl_res['environment_backend']}) Champion Fitness: "
+        f"{rl_res['baseline_seed_metrics']['total_fitness']} -> {rl_res['champion_metrics']['total_fitness']} "
+        f"| Worlds={rl_res['replay_world_pool_summary']['final_worlds_count']} | "
+        f"Promoted={rl_res['promoted_policy']['policy_id']} | OutperformsAll={bench['outperforms_all_baselines']}"
+    )
+
     print("================================================================================")
-    print("[PASS] ALL 9 ARIXV-TO-CODE, LANGEXTRACT, DYNAROT, EVOLVE & LLM VERIFIER TESTS PASSED!")
+    print("[PASS] ALL 10 ARIXV-TO-CODE, LANGEXTRACT, DYNAROT, EVOLVE, DREAM-RSI RL & VERIFIER TESTS PASSED!")
     print("================================================================================")
     return True
 
@@ -584,6 +622,61 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Disable tqdm progress bars and console spinners (for quiet/machine-parsed runs)",
     )
 
+    g_rl = parser.add_argument_group("5b. Dream-RSI Reinforcement Learning Optimization (--rl / arXiv:2609.14858)")
+    g_rl.add_argument(
+        "--rl",
+        "--dream-rsi",
+        "--use-rl",
+        "--rl-evolve",
+        dest="use_rl",
+        action="store_true",
+        help=(
+            "Optimize generated Python code with Dream-RSI Reinforcement Learning (arXiv:2609.14858): "
+            "online discovery trees -> frozen evolving replay worlds -> zero-cost offline dreaming "
+            "meta-policy self-improvement + 5-baseline 95%% CI empirical superiority proof"
+        ),
+    )
+    g_rl.add_argument(
+        "--rl-cycles",
+        type=int,
+        default=3,
+        help="Number of Dream-RSI recursive self-improvement cycles (explore -> pool -> dream -> promote; default: 3)",
+    )
+    g_rl.add_argument(
+        "--rl-budget",
+        type=int,
+        default=12,
+        help="Online candidate evaluation budget per Dream-RSI cycle (default: 12)",
+    )
+    g_rl.add_argument(
+        "--rl-dream-candidates",
+        type=int,
+        default=24,
+        help="Number of candidate exploration policies evaluated offline per dreaming phase (default: 24)",
+    )
+    g_rl.add_argument(
+        "--rl-llm",
+        action="store_true",
+        help="Enable local Ollama LLM-guided meta-exploration policy rewriting during Dream-RSI offline dreaming",
+    )
+    g_rl.add_argument(
+        "--rl-benchmark",
+        action="store_true",
+        help="Print the full 5-baseline matched-seed 95%% Student-t CI empirical benchmark table (Disabled, Random, Heuristic, NoLearning, DreamRSI_Learned)",
+    )
+    g_rl.add_argument(
+        "--rl-seeds",
+        type=int,
+        default=7,
+        help="Number of matched seeds for the 95%% Student-t CI empirical benchmark (default: 7)",
+    )
+    g_rl.add_argument(
+        "--rl-trace-pool",
+        type=str,
+        default=None,
+        help="Optional shared directory for persistent `trace_pool.jsonl` replay worlds across multiple runs/papers",
+    )
+
     g_swarm = parser.add_argument_group("6. Agentic Swarm, Universal MCP Server & Test Suites")
     g_swarm.add_argument(
         "--langgraph",
@@ -602,17 +695,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--mcp-tools",
         dest="list_tools",
         action="store_true",
-        help="Print JSON catalog of all 9 registered Universal MCP Server tools and exit",
+        help="Print JSON catalog of all 10 registered Universal MCP Server tools and exit",
     )
     g_swarm.add_argument(
         "--mcp",
         action="store_true",
-        help="Start the ArXiv-to-Code Universal MCP Server over stdio JSON-RPC 2.0 (9 Tools)",
+        help="Start the ArXiv-to-Code Universal MCP Server over stdio JSON-RPC 2.0 (10 Tools)",
     )
     g_swarm.add_argument(
         "--test",
         action="store_true",
-        help="Run the 9-step automated end-to-end functional self-test suite",
+        help="Run the 10-step automated end-to-end functional self-test suite",
     )
     g_swarm.add_argument(
         "--pytest",
@@ -662,7 +755,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         else ([args.verify_model.strip()] if args.verify_model and args.verify_model.strip() else None)
     )
 
-    needs_local_llm = bool(args.verify_panel or args.verify_llm or args.langextract_llm or args.evolve_llm)
+    needs_local_llm = bool(args.verify_panel or args.verify_llm or args.langextract_llm or args.evolve_llm or args.rl_llm)
     should_auto_provision = (
         args.auto_provision
         or (
@@ -686,7 +779,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             show_progress=show_ui,
         )
         print(json.dumps(prov, indent=2), flush=True)
-        if not args.arxiv_id and not args.evolve and not args.dynarot and not args.extract_doc and not args.audit and not args.verify_llm and not args.verify_panel:
+        if not args.arxiv_id and not args.evolve and not args.use_rl and not args.dynarot and not args.extract_doc and not args.audit and not args.verify_llm and not args.verify_panel:
             return 0
     elif should_auto_provision:
         min_needed = (args.panel_size or 2) if args.verify_panel else 1
@@ -716,7 +809,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("[MODELFUSION DYNAROT] HARDWARE SIZING, PARETO FRONT & COMPUTE SPLIT", flush=True)
         print("================================================================================", flush=True)
         print(json.dumps(dynarot_decision.to_dict(), indent=2), flush=True)
-        if not args.arxiv_id and not args.evolve and not args.extract_doc and not args.audit and not args.verify_llm and not args.verify_panel:
+        if not args.arxiv_id and not args.evolve and not args.use_rl and not args.extract_doc and not args.audit and not args.verify_llm and not args.verify_panel:
             return 0
 
     if args.audit:
@@ -934,14 +1027,101 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for ev in evo_report["cross_pollination_events"]:
                     print(f"    * {ev['direction']} -> {ev}", flush=True)
 
-            verification_report = None
-            if args.verify_panel or args.verify_llm:
-                target_code = (
+            rl_report = None
+            if args.use_rl:
+                rl_seed_code = (
                     evo_report["champion_candidate"]["source_code"]
                     if evo_report is not None
                     else code_bundle["production_python_code"]
                 )
-                code_stage = "evolved_champion" if evo_report is not None else "synthesized"
+                print("\n================================================================================", flush=True)
+                print(
+                    f"[DREAM-RSI RL] Optimizing Python code for arXiv:{code_bundle['clean_arxiv_id']} "
+                    f"(cycles={args.rl_cycles}, budget={args.rl_budget}, dream_candidates={args.rl_dream_candidates}, "
+                    f"llm_dreaming={args.rl_llm})...",
+                    flush=True,
+                )
+                print("================================================================================", flush=True)
+                rl_report = run_dream_rsi_rl_optimization(
+                    seed_python_code=rl_seed_code,
+                    arxiv_id=code_bundle["clean_arxiv_id"],
+                    rl_cycles=args.rl_cycles,
+                    rl_budget=args.rl_budget,
+                    dream_candidates=args.rl_dream_candidates,
+                    use_llm_dreaming=args.rl_llm,
+                    benchmark_seeds=args.rl_seeds,
+                    trace_pool_dir=args.rl_trace_pool,
+                    dynarot_decision=dynarot_decision,
+                    show_progress=show_ui,
+                )
+                rl_pol = rl_report["promoted_policy"]
+                rl_pool = rl_report["replay_world_pool_summary"]
+                rl_bench = rl_report["empirical_benchmark_95ci"]
+                print(
+                    f"  Environment Backend   : {rl_report['environment_backend']} "
+                    f"(Official External Pkg: {rl_report['is_official_external_package']})",
+                    flush=True,
+                )
+                print(
+                    f"  Baseline -> RL Champ  : {rl_report['baseline_seed_metrics']['total_fitness']}/100 -> "
+                    f"{rl_report['champion_metrics']['total_fitness']}/100 "
+                    f"(Speedup: {rl_report['speedup_ratio']}x | {rl_report['champion_metrics']['execution_time_us']} us | "
+                    f"{rl_report['champion_metrics']['peak_memory_kib']} KiB)",
+                    flush=True,
+                )
+                print(
+                    f"  Replay World Pool     : {rl_pool['final_worlds_count']} worlds | "
+                    f"{rl_pool['total_recorded_tree_nodes']} cached tree nodes (0 live execs during dreaming)",
+                    flush=True,
+                )
+                print(
+                    f"  Promoted Meta-Policy  : {rl_pol['policy_id']} ({rl_pol['policy_origin']}) | "
+                    f"c={rl_pol['uct_exploration_c']}, depth={rl_pol['depth_bonus']}, "
+                    f"struct_p={rl_pol['structural_vs_micro_prob']}, batch={rl_pol['parallel_batch_width']}, "
+                    f"stop_patience={rl_pol['early_stop_patience']}",
+                    flush=True,
+                )
+                print(
+                    f"  95% CI Empirical Proof: OutperformsAll={rl_bench['outperforms_all_baselines']} | "
+                    f"Deltas={rl_bench['superiority_deltas']}",
+                    flush=True,
+                )
+                if args.rl_benchmark or True:
+                    print("  5-Baseline Matched-Seed Benchmark (95% Student-t CI):", flush=True)
+                    for b_name, b_data in rl_bench["baselines"].items():
+                        rw = b_data["cumulative_replay_reward_ci95"]
+                        pk = b_data["peak_fitness_ci95"]
+                        sv = b_data["evaluations_saved_pct_ci95"]
+                        print(
+                            f"    * {b_name:<17}: Reward={rw['mean']:.2f} +/- {rw['ci95_half_width']:.2f} | "
+                            f"PeakFit={pk['mean']:.2f} +/- {pk['ci95_half_width']:.2f} | "
+                            f"Saved={sv['mean']:.1f}%",
+                            flush=True,
+                        )
+
+            verification_report = None
+            if args.verify_panel or args.verify_llm:
+                # Pick highest-fitness passing champion across synthesized, evolved, and Dream-RSI RL
+                candidates_for_verify: List[tuple] = [
+                    (0.0, "synthesized", code_bundle["production_python_code"]),
+                ]
+                if evo_report is not None:
+                    candidates_for_verify.append(
+                        (
+                            float(evo_report["champion_metrics"]["total_fitness"]),
+                            "evolved_champion",
+                            evo_report["champion_candidate"]["source_code"],
+                        )
+                    )
+                if rl_report is not None:
+                    candidates_for_verify.append(
+                        (
+                            float(rl_report["champion_metrics"]["total_fitness"]),
+                            "rl_dream_rsi_champion",
+                            rl_report["champion_candidate"]["source_code"],
+                        )
+                    )
+                _, code_stage, target_code = max(candidates_for_verify, key=lambda x: x[0])
                 print("\n================================================================================", flush=True)
                 if args.verify_panel:
                     print(
@@ -1058,6 +1238,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     evolution_report=evo_report,
                     dynarot_decision=dynarot_decision.to_dict(),
                     verification_report=verification_report,
+                    rl_report=rl_report,
                 )
 
             print("\n  [ORGANIZED OUTPUT ARTIFACTS]", flush=True)
@@ -1069,6 +1250,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             if saved_artifacts.get("evolved_champion"):
                 print(f"    Evolved Champion   : {saved_artifacts['evolved_champion']}", flush=True)
                 print(f"    Evolution Report   : {saved_artifacts['evolution_report']}", flush=True)
+            if saved_artifacts.get("rl_champion"):
+                print(f"    Dream-RSI Champion : {saved_artifacts['rl_champion']}", flush=True)
+                print(f"    Dream-RSI Report   : {saved_artifacts['rl_report']}", flush=True)
+                print(f"    Promoted RL Policy : {saved_artifacts['rl_policy']}", flush=True)
+                print(f"    Replay Worlds JSONL: {saved_artifacts['rl_trace_pool']}", flush=True)
             if saved_artifacts.get("verification_report"):
                 print(f"    Verification Report: {saved_artifacts['verification_report']}", flush=True)
             print(f"    Workspace Index    : {saved_artifacts['index_md']}", flush=True)

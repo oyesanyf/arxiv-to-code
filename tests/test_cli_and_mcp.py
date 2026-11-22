@@ -14,6 +14,7 @@ from arxiv_to_code.mcp_server import (
     extract_document_langextract,
     generate_python_code_from_paper,
     main as mcp_main,
+    optimize_code_with_dream_rsi_rl,
     run_langgraph_arxiv_to_code_swarm,
     search_and_rank_arxiv_papers,
     verify_generated_python_code,
@@ -38,7 +39,7 @@ def test_cli_and_mcp_help_documentation(capsys) -> None:
     mcp_main(["--list-tools"])
     captured = capsys.readouterr().out
     catalog = json.loads(captured)
-    assert catalog["total_tools"] == 9
+    assert catalog["total_tools"] == 10
 
 
 def test_cli_flags_evolve_and_dynarot(tmp_path: Path) -> None:
@@ -187,3 +188,20 @@ def test_all_8_mcp_tools(tmp_path: Path) -> None:
     ver_data = json.loads(ver_raw)
     assert ver_data["verdict"] == "PASS"
     assert ver_data["deterministic_checks"]["runtime_tests_passed"] == 4
+
+    # Tool 10: optimize_code_with_dream_rsi_rl
+    rl_raw = asyncio.run(
+        optimize_code_with_dream_rsi_rl(
+            arxiv_id="2608.15888",
+            rl_cycles=2,
+            rl_budget=6,
+            dream_candidates=10,
+            benchmark_seeds=5,
+        )
+    )
+    rl_data = json.loads(rl_raw)
+    assert rl_data["environment_backend"] in (
+        "native_dream_rsi_replay_world_model",
+        "official_google_research_dream_rsi",
+    )
+    assert rl_data["champion_metrics"]["tests_passed"] == 4
