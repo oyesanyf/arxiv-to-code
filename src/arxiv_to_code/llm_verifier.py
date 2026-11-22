@@ -361,9 +361,9 @@ def _build_llm_verification_prompt(
         )
     spans_block = "\n".join(spans_lines) if spans_lines else "  (No extracted spans provided)"
 
-    # Keep code concise for fast local open-weight model inference while preserving core logic
-    code_excerpt = source_code if len(source_code) <= 8500 else (
-        source_code[:5500] + "\n# ... [middle truncated for verifier context window] ...\n" + source_code[-2500:]
+    # Keep code concise for fast VRAM-resident local open-weight model inference while preserving core logic
+    code_excerpt = source_code if len(source_code) <= 4800 else (
+        source_code[:3400] + "\n# ... [middle truncated for verifier context window] ...\n" + source_code[-1200:]
     )
 
     return (
@@ -411,11 +411,16 @@ def _clamp_score(val: Any, default: float = 0.0) -> float:
 def parse_llm_verification_json(raw_text: str) -> Optional[Dict[str, Any]]:
     """
     Robustly parses a structured JSON verification verdict from raw LLM output.
-    Handles markdown code fences and surrounding whitespace cleanly.
+    Strips `<think>...</think>` reasoning blocks (DeepSeek-R1 / GLM-4.7-Flash) and
+    markdown code fences cleanly.
     """
     if not raw_text or not raw_text.strip():
         return None
     cleaned = raw_text.strip()
+    end_think = cleaned.rfind("</think>")
+    if end_think != -1:
+        cleaned = cleaned[end_think + len("</think>") :].strip()
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL | re.IGNORECASE).strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE | re.MULTILINE)
     cleaned = re.sub(r"\s*```\s*$", "", cleaned, flags=re.MULTILINE).strip()
 
@@ -483,7 +488,7 @@ def _invoke_ollama_llm_judge(
     endpoint: str,
     model_tag: str,
     prompt: str,
-    timeout_sec: float = 25.0,
+    timeout_sec: float = 120.0,
 ) -> Tuple[Optional[Dict[str, Any]], str, str]:
     """
     Calls local Ollama `/api/generate` (with automatic `/api/chat` fallback if the model prefers
@@ -492,6 +497,7 @@ def _invoke_ollama_llm_judge(
     Returns `(parsed_dict_or_None, status_code, raw_excerpt)`.
     """
     clean_model = sanitize_model_tag(model_tag)
+    is_reasoning_model = any(k in clean_model.lower() for k in ("deepseek-r1", "qwq", "glm-4.7"))
     opener = build_no_proxy_opener()
     headers = {
         "Content-Type": "application/json",
@@ -499,18 +505,21 @@ def _invoke_ollama_llm_judge(
     }
 
     gen_url = f"{endpoint.rstrip('/')}/api/generate"
-    gen_payload = json.dumps(
-        {
-            "model": clean_model,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
-            "options": {
-                "temperature": 0.1,
-                "num_predict": 650,
-            },
-        }
-    ).encode("utf-8")
+    gen_body_obj: Dict[str, Any] = {
+        "model": clean_model,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+        "options": {
+            "temperature": 0.1,
+            "num_predict": 1000 if is_reasoning_model else 700,
+            "num_ctx": 4096,
+        },
+    }
+    if is_reasoning_model:
+        # Disable multi-thousand-token hidden reasoning when strict JSON output is requested (Ollama >= 0.9)
+        gen_body_obj["think"] = False
+    gen_payload = json.dumps(gen_body_obj).encode("utf-8")
 
     try:
         req = urllib.request.Request(gen_url, data=gen_payload, method="POST", headers=headers)
@@ -525,7 +534,7 @@ def _invoke_ollama_llm_judge(
             return None, f"ollama_http_{resp.status}_fallback", ""
     except urllib.error.HTTPError as exc:
         if exc.code == 400:
-            # Try /api/chat fallback for chat-only Ollama templates
+            # Try /api/chat fallback for chat-only Ollama templates (and without `think` for older Ollama)
             chat_url = f"{endpoint.rstrip('/')}/api/chat"
             chat_payload = json.dumps(
                 {
@@ -533,7 +542,7 @@ def _invoke_ollama_llm_judge(
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
                     "format": "json",
-                    "options": {"temperature": 0.1, "num_predict": 650},
+                    "options": {"temperature": 0.1, "num_predict": 900, "num_ctx": 4096},
                 }
             ).encode("utf-8")
             try:
@@ -612,7 +621,7 @@ def verify_generated_python_code(
     model_id: Optional[str] = None,
     ollama_endpoint: Optional[str] = None,
     dynarot_decision: Optional[DynaRotRoutingDecision] = None,
-    timeout_sec: float = 25.0,
+    timeout_sec: float = 120.0,
     enable_llm: bool = True,
 ) -> CodeVerificationReport:
     """

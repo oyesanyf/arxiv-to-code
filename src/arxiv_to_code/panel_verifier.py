@@ -677,7 +677,7 @@ def run_model_panel_verification(
     panel_mode: str = "multi-model",
     ollama_endpoint: Optional[str] = None,
     dynarot_decision: Optional[DynaRotRoutingDecision] = None,
-    timeout_sec: float = 25.0,
+    timeout_sec: float = 120.0,
     enable_llm: bool = True,
 ) -> CodeVerificationReport:
     """
@@ -762,15 +762,17 @@ def run_model_panel_verification(
 
         judge_parsed: Optional[Dict[str, Any]] = None
         judge_url = f"{endpoint.rstrip('/')}/api/generate"
-        judge_body = json.dumps(
-            {
-                "model": sanitize_model_tag(judge_model),
-                "prompt": judge_prompt,
-                "stream": False,
-                "format": "json",
-                "options": {"temperature": 0.1, "num_predict": 700},
-            }
-        ).encode("utf-8")
+        clean_judge = sanitize_model_tag(judge_model)
+        judge_body_obj: Dict[str, Any] = {
+            "model": clean_judge,
+            "prompt": judge_prompt,
+            "stream": False,
+            "format": "json",
+            "options": {"temperature": 0.1, "num_predict": 900, "num_ctx": 4096},
+        }
+        if any(k in clean_judge.lower() for k in ("deepseek-r1", "qwq", "glm-4.7")):
+            judge_body_obj["think"] = False
+        judge_body = json.dumps(judge_body_obj).encode("utf-8")
         try:
             req = urllib.request.Request(
                 judge_url,
@@ -882,6 +884,16 @@ def run_model_panel_verification(
             summary_text = (
                 f"Local Ollama ({endpoint}) is offline; verified via Layer-1 deterministic gate. "
                 f"Pull panel models: {', '.join(assembly_meta['recommended_panel_pulls'][:3])}"
+            )
+        elif any_installed_member and panelist_results:
+            err_details = ", ".join(
+                f"{p.model_tag}: {p.status} ({round(p.latency_ms / 1000.0, 1)}s)"
+                for p in panelist_results
+            )
+            panel_status = "panel_llm_timeout_or_error_fallback"
+            summary_text = (
+                f"Ollama is online and panel models are installed, but live panel calls fell back to "
+                f"Layer-1 deterministic verification ({err_details})."
             )
         else:
             panel_status = "panel_no_chat_models_installed_fallback"

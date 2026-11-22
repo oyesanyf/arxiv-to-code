@@ -61,6 +61,14 @@ def is_autoprovision_disabled() -> bool:
     return val in ("1", "true", "yes")
 
 
+def is_ci_or_pytest_environment() -> bool:
+    """True when running inside pytest or a CI runner so tests never stall downloading multi-GB weights."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    ci_val = os.environ.get("CI", "").strip().lower()
+    return ci_val in ("1", "true", "yes")
+
+
 # =============================================================================
 # 1. Multi-Location Ollama Binary Discovery & Safe Auto-Installer
 # =============================================================================
@@ -580,7 +588,7 @@ def dynamically_provision_ollama_and_models(
     daemon_status = ensure_ollama_daemon(
         endpoint=ep,
         auto_install_ollama=auto_install_ollama and auto_pull,
-        wait_timeout_sec=10.0,
+        wait_timeout_sec=15.0,
     )
     ollama_online = bool(daemon_status.get("online"))
     installed_before: List[str] = list(daemon_status.get("installed_models") or [])

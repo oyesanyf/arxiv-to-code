@@ -214,5 +214,10 @@ def test_cli_provision_and_auto_provision_flags() -> None:
     parser = build_arg_parser()
     ns = parser.parse_args(["--auto-provision", "--verify-panel", "--panel-models", "glm4:9b,deepseek-r1:7b"])
     assert ns.auto_provision is True
+    assert ns.no_auto_provision is False
     assert ns.verify_panel is True
     assert ns.panel_models == "glm4:9b,deepseek-r1:7b"
+
+    ns_off = parser.parse_args(["--no-auto-provision", "--verify-llm"])
+    assert ns_off.no_auto_provision is True
+    assert ns_off.verify_llm is True

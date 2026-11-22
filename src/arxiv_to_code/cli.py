@@ -44,6 +44,8 @@ from .mcp_server import arxiv_to_code_status, main as run_mcp_server
 from .ollama_provisioner import (
     dynamically_provision_ollama_and_models,
     ensure_models_for_pipeline,
+    is_autoprovision_disabled,
+    is_ci_or_pytest_environment,
 )
 from .panel_verifier import run_model_panel_verification
 from .progress import create_progress_bar, spinner
@@ -511,9 +513,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--auto-provision",
         action="store_true",
         help=(
-            "On-demand auto-provisioning guard for --verify-panel, --verify-llm, and --langextract-llm: "
-            "automatically installs/starts Ollama and pulls missing resource-fitted models before execution"
+            "Force on-demand auto-provisioning: if Ollama is missing, installs Ollama, starts `ollama serve`, "
+            "and pulls properly resource-sized models (enabled automatically for --verify-panel/--verify-llm/--langextract-llm)"
         ),
+    )
+    g_dynarot.add_argument(
+        "--no-auto-provision",
+        action="store_true",
+        help="Disable automatic Ollama installation and on-demand model pulling during LLM verification/extraction",
     )
     g_dynarot.add_argument(
         "--model-family",
@@ -655,6 +662,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         else ([args.verify_model.strip()] if args.verify_model and args.verify_model.strip() else None)
     )
 
+    needs_local_llm = bool(args.verify_panel or args.verify_llm or args.langextract_llm or args.evolve_llm)
+    should_auto_provision = (
+        args.auto_provision
+        or (
+            needs_local_llm
+            and not args.no_auto_provision
+            and not is_autoprovision_disabled()
+            and not is_ci_or_pytest_environment()
+        )
+    )
+
     if args.install_models:
         print("================================================================================", flush=True)
         print("[OLLAMA PROVISIONER] DYNAMIC OLLAMA AUTO-INSTALL & RESOURCE-BASED MODEL PULL", flush=True)
@@ -670,11 +688,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(prov, indent=2), flush=True)
         if not args.arxiv_id and not args.evolve and not args.dynarot and not args.extract_doc and not args.audit and not args.verify_llm and not args.verify_panel:
             return 0
-    elif args.auto_provision:
+    elif should_auto_provision:
         min_needed = (args.panel_size or 2) if args.verify_panel else 1
-        print("================================================================================", flush=True)
-        print("[OLLAMA PROVISIONER] ON-DEMAND AUTO-PROVISION CHECK", flush=True)
-        print("================================================================================", flush=True)
         auto_res = ensure_models_for_pipeline(
             min_eligible_models=min_needed,
             model_family=args.model_family,
@@ -683,11 +698,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             prefer_vram_resident=True,
             show_progress=show_ui,
         )
-        print(
-            f"  [PROVISION] Action={auto_res.get('action')} | Online={auto_res.get('ollama_online')} | "
-            f"Installed={auto_res.get('installed_models_after', [])}",
-            flush=True,
-        )
+        if auto_res.get("action") != "already_satisfied":
+            print("================================================================================", flush=True)
+            print("[OLLAMA PROVISIONER] AUTOMATIC OLLAMA INSTALL & RESOURCE-SIZED MODEL PULL", flush=True)
+            print("================================================================================", flush=True)
+            print(
+                f"  [PROVISION] Action={auto_res.get('action')} | Online={auto_res.get('ollama_online')} | "
+                f"Targets={auto_res.get('target_models', [])} | Installed={auto_res.get('installed_models_after', [])}",
+                flush=True,
+            )
 
     with spinner("ModelFusion DynaRot: probing live free RAM, GPU VRAM, disk & Pareto knee-point", enabled=show_ui):
         dynarot_decision = router.route(prompt=args.query, model_family=args.model_family)
