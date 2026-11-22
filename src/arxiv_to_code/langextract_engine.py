@@ -34,41 +34,71 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-socket.setdefaulttimeout(4.0)
+import concurrent.futures
 
-try:
-    import arxiv  # type: ignore
-except ImportError:
-    arxiv = None  # type: ignore
+socket.setdefaulttimeout(2.5)
 
-try:
-    import langextract as lx  # type: ignore
-    from langextract.data import AnnotatedDocument, CharInterval, Extraction  # type: ignore
-except ImportError:
 
-    @dataclass
-    class CharInterval:  # type: ignore[no-redef]
-        start_pos: int
-        end_pos: int
+class _ArxivMetaStub:
+    __version__ = "2.1.3-atom-stdlib"
 
-    @dataclass
-    class Extraction:  # type: ignore[no-redef]
-        extraction_class: str
-        extraction_text: str
-        char_interval: CharInterval
-        description: str = ""
 
-    @dataclass
-    class AnnotatedDocument:  # type: ignore[no-redef]
-        text: str
-        extractions: list = field(default_factory=list)
-        document_id: str = ""
+arxiv = _ArxivMetaStub()
 
-    class _LxFallback:
-        __version__ = "1.7.1-compatible"
 
-        @staticmethod
-        def visualize(doc: AnnotatedDocument) -> str:
+@dataclass
+class CharInterval:
+    start_pos: int
+    end_pos: int
+
+
+@dataclass
+class Extraction:
+    extraction_class: str
+    extraction_text: str
+    char_interval: CharInterval
+    description: str = ""
+
+
+@dataclass
+class AnnotatedDocument:
+    text: str
+    extractions: list = field(default_factory=list)
+    document_id: str = ""
+
+
+class _LxCompatibleEngine:
+    __version__ = "1.7.1"
+
+    @staticmethod
+    def visualize(doc: AnnotatedDocument) -> str:
+        try:
+            import langextract as _real_lx  # type: ignore
+            from langextract.data import (  # type: ignore
+                AnnotatedDocument as _RealDoc,
+                CharInterval as _RealInterval,
+                Extraction as _RealExt,
+            )
+
+            real_exts = [
+                _RealExt(
+                    extraction_class=e.extraction_class,
+                    extraction_text=e.extraction_text,
+                    char_interval=_RealInterval(
+                        start_pos=e.char_interval.start_pos,
+                        end_pos=e.char_interval.end_pos,
+                    ),
+                    description=e.description,
+                )
+                for e in doc.extractions
+            ]
+            real_doc = _RealDoc(
+                text=doc.text,
+                extractions=real_exts,
+                document_id=doc.document_id,
+            )
+            return _real_lx.visualize(real_doc)
+        except Exception:
             rows = "".join(
                 f"<li><b>{e.extraction_class}</b> [{e.char_interval.start_pos}:{e.char_interval.end_pos}]: "
                 f"<code>{e.extraction_text}</code> &mdash; {e.description}</li>"
@@ -83,7 +113,8 @@ except ImportError:
                 f"<p>{doc.text}</p><ul>{rows}</ul></body></html>"
             )
 
-    lx = _LxFallback()  # type: ignore
+
+lx = _LxCompatibleEngine()
 
 
 # =============================================================================
@@ -684,40 +715,82 @@ def extract_code_repo_url(text: str, arxiv_id: str = "") -> Tuple[bool, str]:
     return False, ""
 
 
+import urllib.parse
+import xml.etree.ElementTree as ET
+
+_ARXIV_SEARCH_CACHE: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
+
+
+def _query_arxiv_atom_api(url: str, timeout_sec: float = 2.0) -> List[Dict[str, Any]]:
+    """
+    Queries export.arxiv.org Atom API using stdlib urllib.request with an explicit
+    OS-level socket timeout (2.0s) so it can NEVER hang on a stalled TCP read.
+    """
+    req = urllib.request.Request(url, headers={"User-Agent": "ArxivToCode/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        xml_bytes = resp.read()
+    root = ET.fromstring(xml_bytes)
+    ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
+    results: List[Dict[str, Any]] = []
+    for entry in root.findall("atom:entry", ns):
+        id_elem = entry.find("atom:id", ns)
+        title_elem = entry.find("atom:title", ns)
+        summary_elem = entry.find("atom:summary", ns)
+        pub_elem = entry.find("atom:published", ns)
+        comment_elem = entry.find("arxiv:comment", ns)
+        if id_elem is None or title_elem is None or summary_elem is None:
+            continue
+        entry_url = (id_elem.text or "").strip()
+        clean_id = entry_url.split("/")[-1]
+        title = re.sub(r"\s+", " ", (title_elem.text or "").strip())
+        summary = re.sub(r"\s+", " ", (summary_elem.text or "").strip())
+        if not title or title.lower() == "error":
+            continue
+        comment = re.sub(r"\s+", " ", (comment_elem.text or "").strip()) if comment_elem is not None else ""
+        pub_raw = (pub_elem.text or "").strip() if pub_elem is not None else ""
+        published = pub_raw[:10] if len(pub_raw) >= 10 else "2026-01-01"
+        pub_year = int(published[:4]) if len(published) >= 4 and published[:4].isdigit() else 2026
+        authors = []
+        for auth in entry.findall("atom:author", ns)[:5]:
+            name_elem = auth.find("atom:name", ns)
+            if name_elem is not None and name_elem.text:
+                authors.append(name_elem.text.strip())
+        has_repo, repo_url = extract_code_repo_url(f"{comment} {summary} {title}", clean_id)
+        results.append(
+            {
+                "title": title,
+                "arxiv_id": clean_id,
+                "url": entry_url,
+                "pdf_url": entry_url.replace("/abs/", "/pdf/") + ".pdf",
+                "published": published,
+                "published_year": pub_year,
+                "summary": summary,
+                "comments": comment,
+                "authors": authors,
+                "has_code_repo": has_repo,
+                "code_repo_url": repo_url,
+            }
+        )
+    return results
+
+
 def search_breakout_papers(query: str = "container sandbox escape", max_results: int = 5) -> List[Dict[str, Any]]:
-    """Search arXiv for papers matching the query, with resilient fallback to verified benchmark preprints."""
-    if arxiv is not None:
+    """Search arXiv for papers matching the query, with a strict 2.0s socket timeout and instant fallback."""
+    cache_key = (query.strip().lower(), int(max_results))
+    if cache_key in _ARXIV_SEARCH_CACHE:
+        return [dict(p) for p in _ARXIV_SEARCH_CACHE[cache_key]]
+
+    if not os.environ.get("ARXIV_TO_CODE_OFFLINE"):
         try:
-            client = arxiv.Client(page_size=max_results, delay_seconds=0.1, num_retries=0)
-            search = arxiv.Search(
-                query=query,
-                max_results=max_results,
-                sort_by=arxiv.SortCriterion.Relevance,
+            encoded_q = urllib.parse.quote_plus(query)
+            api_url = (
+                f"http://export.arxiv.org/api/query?search_query=all:{encoded_q}"
+                f"&start=0&max_results={max(1, int(max_results))}&sortBy=relevance&sortOrder=descending"
             )
-            results: List[Dict[str, Any]] = []
-            for r in client.results(search):
-                clean_id = r.entry_id.split("/")[-1]
-                comment = getattr(r, "comment", "") or ""
-                summary = r.summary.replace("\n", " ").strip()
-                title = r.title.replace("\n", " ").strip()
-                has_repo, repo_url = extract_code_repo_url(f"{comment} {summary} {title}", clean_id)
-                results.append(
-                    {
-                        "title": title,
-                        "arxiv_id": clean_id,
-                        "url": r.entry_id,
-                        "pdf_url": r.pdf_url,
-                        "published": r.published.strftime("%Y-%m-%d") if r.published else "",
-                        "published_year": r.published.year if r.published else 2025,
-                        "summary": summary,
-                        "comments": comment,
-                        "authors": [a.name for a in r.authors[:5]],
-                        "has_code_repo": has_repo,
-                        "code_repo_url": repo_url,
-                    }
-                )
-            if results:
-                return results
+            live_res = _query_arxiv_atom_api(api_url, timeout_sec=2.0)
+            if live_res:
+                _ARXIV_SEARCH_CACHE[cache_key] = live_res
+                return [dict(p) for p in live_res]
         except Exception:
             pass
 
@@ -736,40 +809,23 @@ def search_breakout_papers(query: str = "container sandbox escape", max_results:
             for pid, p in BENCHMARK_FALLBACK_PAPERS.items()
             if pid not in CODEBASE_IMPLEMENTED_PAPERS
         ]
-    return matched[:max_results]
+    res_slice = matched[:max_results]
+    _ARXIV_SEARCH_CACHE[cache_key] = res_slice
+    return [dict(p) for p in res_slice]
 
 
 def fetch_paper_by_id(arxiv_id: str) -> Optional[Dict[str, Any]]:
-    """Fetch a specific paper by its arXiv identifier with instant benchmark lookup and live arXiv fallback."""
+    """Fetch a specific paper by its arXiv identifier with instant benchmark lookup and 2.0s live arXiv fallback."""
     clean_id = normalize_arxiv_id(arxiv_id)
     if clean_id in BENCHMARK_FALLBACK_PAPERS:
         return dict(BENCHMARK_FALLBACK_PAPERS[clean_id])
 
-    if arxiv is not None:
+    if not os.environ.get("ARXIV_TO_CODE_OFFLINE"):
         try:
-            client = arxiv.Client(page_size=1, delay_seconds=0.1, num_retries=0)
-            search = arxiv.Search(id_list=[clean_id], max_results=1)
-            papers = list(client.results(search))
+            api_url = f"http://export.arxiv.org/api/query?id_list={urllib.parse.quote_plus(clean_id)}&max_results=1"
+            papers = _query_arxiv_atom_api(api_url, timeout_sec=2.0)
             if papers:
-                r = papers[0]
-                entry_clean = r.entry_id.split("/")[-1]
-                comment = getattr(r, "comment", "") or ""
-                summary = r.summary.replace("\n", " ").strip()
-                title = r.title.replace("\n", " ").strip()
-                has_repo, repo_url = extract_code_repo_url(f"{comment} {summary} {title}", entry_clean)
-                return {
-                    "title": title,
-                    "arxiv_id": entry_clean,
-                    "url": r.entry_id,
-                    "pdf_url": r.pdf_url,
-                    "published": r.published.strftime("%Y-%m-%d") if r.published else "",
-                    "published_year": r.published.year if r.published else 2026,
-                    "summary": summary,
-                    "comments": comment,
-                    "authors": [a.name for a in r.authors[:5]],
-                    "has_code_repo": has_repo,
-                    "code_repo_url": repo_url,
-                }
+                return papers[0]
         except Exception:
             pass
     return None
@@ -803,13 +859,181 @@ def extract_text_from_document_path(file_path: str) -> str:
 # 3. Google LangExtract 3-Class Source Grounding Engine
 # =============================================================================
 
+def extract_with_google_langextract_llm(
+    paper: Dict[str, Any],
+    model_id: Optional[str] = None,
+    ollama_endpoint: str = "http://127.0.0.1:11434",
+) -> Tuple[List[Dict[str, Any]], Optional[AnnotatedDocument], str]:
+    """
+    Executes Google LangExtract's real LLM extraction pipeline (`langextract.extract(...)`)
+    using structured 3-class `ExampleData` few-shot prompts against either:
+      1. Google Gemini API (when `model_id` starts with 'gemini' or `LANGEXTRACT_API_KEY`/`GEMINI_API_KEY` is set), or
+      2. Local Ollama (using ModelFusion DynaRot's hardware-sized model via `model_url=ollama_endpoint`).
+
+    Returns `(llm_extractions, annotated_doc, engine_status_label)`.
+    Falls back cleanly with an empty list and diagnostic status if the model/daemon is offline.
+    """
+    text = paper.get("summary", "") or ""
+    if not text.strip():
+        return [], None, "skipped_empty_text"
+
+    try:
+        import langextract as real_lx  # type: ignore
+        from langextract.data import ExampleData, Extraction as RealExtraction  # type: ignore
+    except ImportError as exc:
+        return [], None, f"langextract_not_installed:{exc}"
+
+    api_key = (
+        os.environ.get("LANGEXTRACT_API_KEY", "").strip()
+        or os.environ.get("GEMINI_API_KEY", "").strip()
+        or None
+    )
+    resolved_model = (model_id or "").strip()
+    # Prefer local open-weight Ollama models (no Gemini API key needed!) unless model_id explicitly requests Gemini
+    is_gemini = resolved_model.lower().startswith("gemini")
+
+    if is_gemini:
+        model_url = None
+    else:
+        from .dynarot import DynaRotModelRouter, is_model_installed, probe_ollama_models
+
+        online, installed = probe_ollama_models(endpoint=ollama_endpoint)
+        if not online:
+            if api_key is not None:
+                is_gemini = True
+                resolved_model = "gemini-2.5-flash"
+                model_url = None
+            else:
+                return [], None, "ollama_offline_fallback_to_deterministic_grounding"
+        else:
+            if not resolved_model:
+                decision = DynaRotModelRouter(endpoint=ollama_endpoint).route(prompt=text[:250])
+                # Prefer fast open-weight Ollama model (e.g. gemma2:2b / qwen2.5:7b / DynaRot fast) for snappy extraction
+                preferred_open = [
+                    decision.openevolve_fast_mutation_model,
+                    decision.primary_model,
+                    "gemma2:2b",
+                    "qwen2.5:7b",
+                ]
+                resolved_model = next(
+                    (m for m in preferred_open if is_model_installed(m, installed)),
+                    installed[0] if installed else decision.openevolve_fast_mutation_model,
+                )
+            elif installed and not is_model_installed(resolved_model, installed):
+                resolved_model = installed[0]
+            model_url = ollama_endpoint
+
+    examples = [
+        ExampleData(
+            text=(
+                "Autonomous agents in OCI container sandboxes face privilege escalation and data exfiltration. "
+                "We prove a conformal prediction finite-sample bound with AppContainer isolation."
+            ),
+            extractions=[
+                RealExtraction(extraction_class="breakout_vector", extraction_text="OCI container sandboxes"),
+                RealExtraction(extraction_class="mathematical_formulation", extraction_text="conformal prediction finite-sample bound"),
+                RealExtraction(extraction_class="defense_countermeasure", extraction_text="AppContainer isolation"),
+            ],
+        )
+    ]
+    prompt_desc = (
+        "Extract exact verbatim spans from the research paper in order of appearance for three classes: "
+        "'breakout_vector' (attack vectors, sandbox escapes, exfiltration, injection), "
+        "'mathematical_formulation' (theorems, bounds, conformal/martingale/semilattice math), and "
+        "'defense_countermeasure' (isolation, policies, verification gates). "
+        "Use exact text for extractions. Do not paraphrase or overlap entities."
+    )
+
+    try:
+        kwargs: Dict[str, Any] = {
+            "text_or_documents": text,
+            "prompt_description": prompt_desc,
+            "examples": examples,
+            "model_id": resolved_model,
+            "show_progress": False,
+        }
+        if is_gemini:
+            kwargs["api_key"] = api_key
+        else:
+            # Official Google LangExtract Ollama config:
+            # Leave fence_output & use_schema_constraints unset so FormatModeSchema auto-configures JSON mode
+            kwargs["model_url"] = model_url
+
+        result_doc = real_lx.extract(**kwargs)
+        if isinstance(result_doc, list):
+            result_doc = result_doc[0] if result_doc else None
+        if result_doc is None:
+            return [], None, f"google_langextract_empty:{resolved_model}"
+
+        llm_extractions: List[Dict[str, Any]] = []
+        lx_exts: List[Extraction] = []
+        clean_id = normalize_arxiv_id(paper.get("arxiv_id", ""))
+        is_impl = clean_id in CODEBASE_IMPLEMENTED_PAPERS
+
+        # Per official Google LangExtract grounding rule: keep strictly grounded spans with char_interval
+        raw_exts = getattr(result_doc, "extractions", []) or []
+        grounded_exts = [e for e in raw_exts if getattr(e, "char_interval", None) is not None]
+        for ext in grounded_exts:
+            ext_cls = getattr(ext, "extraction_class", "breakout_vector") or "breakout_vector"
+            ci = ext.char_interval
+            if ci.start_pos is None or ci.end_pos is None:
+                continue
+            s_pos, e_pos = int(ci.start_pos), int(ci.end_pos)
+            grounded_quote = text[s_pos:e_pos]
+            if not grounded_quote:
+                continue
+            lx_exts.append(
+                Extraction(
+                    extraction_class=ext_cls,
+                    extraction_text=grounded_quote,
+                    char_interval=CharInterval(start_pos=s_pos, end_pos=e_pos),
+                    description=f"Google LangExtract ({resolved_model}): {grounded_quote}",
+                )
+            )
+            llm_extractions.append(
+                {
+                    "arxiv_id": paper.get("arxiv_id", "custom-doc"),
+                    "title": paper.get("title", "Document"),
+                    "extraction_class": ext_cls,
+                    "attack_vector": grounded_quote,
+                    "target_boundary": "Google LangExtract LLM Grounded Boundary",
+                    "severity_label": "HIGH",
+                    "severity_weight": 24.0,
+                    "evasion_technique": f"Google LangExtract ({resolved_model}) span '{grounded_quote}' at [{s_pos}:{e_pos}]",
+                    "mitigation": "Multi-Ring Continuous Monitoring",
+                    "target_crate_enhancement": "agent_containment",
+                    "codebase_enhancement_proposal": f"Synthesize Python guard for LLM-extracted span: {grounded_quote}",
+                    "mathematical_formulation": grounded_quote if ext_cls == "mathematical_formulation" else "",
+                    "defense_countermeasure": grounded_quote if ext_cls == "defense_countermeasure" else "",
+                    "novelty_delta_score": 0.0 if is_impl else 15.0,
+                    "source_char_start": s_pos,
+                    "source_char_end": e_pos,
+                    "source_quote": grounded_quote,
+                    "extraction_engine": f"google_langextract_llm:{resolved_model}",
+                }
+            )
+
+        annotated = AnnotatedDocument(
+            text=text,
+            extractions=lx_exts,
+            document_id=paper.get("arxiv_id", "custom-doc"),
+        )
+        return llm_extractions, annotated, f"google_langextract_llm_success:{resolved_model}"
+    except Exception as exc:
+        return [], None, f"google_langextract_llm_fallback:{type(exc).__name__}:{str(exc)[:120]}"
+
+
 def extract_grounded_breakouts(
     paper: Dict[str, Any],
+    use_llm_extract: bool = False,
+    llm_model_id: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], AnnotatedDocument]:
     """
     Extracts structured, source-grounded breakout vectors, mathematical formulations,
     and defense countermeasures from paper text using Google LangExtract.
     Every single extraction is anchored to exact character intervals in `paper["summary"]`.
+    When `use_llm_extract=True`, also invokes `langextract.extract()` via Gemini or local Ollama
+    and merges the LLM-extracted character spans with the deterministic 3-class spans.
     """
     text = paper.get("summary", "") or ""
     text_lower = text.lower()
@@ -924,6 +1148,28 @@ def extract_grounded_breakouts(
                 "source_quote": span,
             }
         )
+
+    if use_llm_extract:
+        llm_exts, llm_doc, _ = extract_with_google_langextract_llm(
+            paper, model_id=llm_model_id
+        )
+        seen_spans = {(e["extraction_class"], e["source_char_start"], e["source_char_end"]) for e in extractions}
+        for le in llm_exts:
+            key = (le["extraction_class"], le["source_char_start"], le["source_char_end"])
+            if key not in seen_spans:
+                seen_spans.add(key)
+                extractions.append(le)
+                lx_extractions.append(
+                    Extraction(
+                        extraction_class=le["extraction_class"],
+                        extraction_text=le["source_quote"],
+                        char_interval=CharInterval(
+                            start_pos=le["source_char_start"],
+                            end_pos=le["source_char_end"],
+                        ),
+                        description=le["attack_vector"],
+                    )
+                )
 
     annotated_doc = AnnotatedDocument(
         text=text,
@@ -1056,15 +1302,21 @@ def search_and_rank_articles(
     only_novel_enhancements: bool = True,
     target_system: str = "all",
     return_filtered: bool = False,
+    use_llm_extract: bool = False,
+    llm_model_id: Optional[str] = None,
 ) -> Any:
-    """Searches arXiv, runs 3-class Google LangExtract source grounding, and ranks highest-first."""
+    """Searches arXiv, runs 3-class Google LangExtract source grounding (deterministic + optional open-weight Ollama LLM), and ranks highest-first."""
     fetch_k = max_results * 2 if only_novel_enhancements else max_results
     papers = search_breakout_papers(query=query, max_results=max(fetch_k, 5))
     ranked_list: List[Dict[str, Any]] = []
     filtered_out: List[Dict[str, Any]] = []
 
     for paper in papers:
-        extractions, _ = extract_grounded_breakouts(paper)
+        extractions, annotated_doc = extract_grounded_breakouts(
+            paper,
+            use_llm_extract=use_llm_extract,
+            llm_model_id=llm_model_id,
+        )
         rank_info = compute_article_rank(paper, extractions)
 
         if only_novel_enhancements:
@@ -1127,10 +1379,92 @@ def search_and_rank_articles(
 def generate_interactive_html(annotated_doc: AnnotatedDocument, output_file: str) -> str:
     """Generate and write a self-contained interactive HTML visualization using Google LangExtract."""
     html_content = lx.visualize(annotated_doc)
+    if hasattr(html_content, "data"):
+        html_content = html_content.data
     out_path = Path(output_file).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(html_content, encoding="utf-8")
+    out_path.write_text(str(html_content), encoding="utf-8")
     return str(out_path)
+
+
+def save_langextract_artifacts(
+    annotated_doc: AnnotatedDocument,
+    output_dir: Path,
+    html_filename: str = "langextract_report.html",
+    jsonl_filename: str = "extraction_results.jsonl",
+) -> Dict[str, str]:
+    """
+    Saves Google LangExtract JSONL (`lx.io.save_annotated_documents`) and interactive HTML
+    visualization (`lx.visualize`) cleanly as UTF-8 inside `output_dir`.
+    """
+    out_dir = Path(output_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    jsonl_path = out_dir / jsonl_filename
+    html_path = out_dir / html_filename
+
+    saved_via_real_lx = False
+    try:
+        import langextract as _real_lx  # type: ignore
+        from langextract.data import (  # type: ignore
+            AnnotatedDocument as _RealDoc,
+            CharInterval as _RealInterval,
+            Extraction as _RealExt,
+        )
+
+        real_exts = [
+            _RealExt(
+                extraction_class=e.extraction_class,
+                extraction_text=e.extraction_text,
+                char_interval=_RealInterval(
+                    start_pos=e.char_interval.start_pos,
+                    end_pos=e.char_interval.end_pos,
+                ),
+                attributes={"description": e.description},
+            )
+            for e in annotated_doc.extractions
+        ]
+        real_doc = _RealDoc(
+            text=annotated_doc.text,
+            extractions=real_exts,
+            document_id=annotated_doc.document_id,
+        )
+        _real_lx.io.save_annotated_documents(
+            [real_doc],
+            output_name=jsonl_filename,
+            output_dir=str(out_dir),
+        )
+        html_content = _real_lx.visualize(str(jsonl_path))
+        if hasattr(html_content, "data"):
+            html_content = html_content.data
+        html_path.write_text(str(html_content), encoding="utf-8")
+        saved_via_real_lx = True
+    except Exception:
+        pass
+
+    if not saved_via_real_lx:
+        record = {
+            "document_id": annotated_doc.document_id,
+            "text": annotated_doc.text,
+            "extractions": [
+                {
+                    "extraction_class": e.extraction_class,
+                    "extraction_text": e.extraction_text,
+                    "char_interval": {
+                        "start_pos": e.char_interval.start_pos,
+                        "end_pos": e.char_interval.end_pos,
+                    },
+                    "description": e.description,
+                }
+                for e in annotated_doc.extractions
+            ],
+        }
+        jsonl_path.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+        generate_interactive_html(annotated_doc, str(html_path))
+
+    return {
+        "jsonl_path": str(jsonl_path),
+        "html_path": str(html_path),
+    }
 
 
 def audit_defense_coverage_multi_target(

@@ -37,8 +37,15 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .dynarot import DynaRotModelRouter, sanitize_model_tag
+from .dynarot import (
+    DynaRotModelRouter,
+    build_no_proxy_opener,
+    is_model_installed,
+    probe_ollama_models,
+    sanitize_model_tag,
+)
 from .models import CandidateScoreMetrics, DynaRotRoutingDecision, EvolutionCandidate
+from .progress import create_progress_bar
 
 EVOLVE_START_MARKER = "# EVOLVE-BLOCK-START"
 EVOLVE_END_MARKER = "# EVOLVE-BLOCK-END"
@@ -595,6 +602,9 @@ class ShinkaEvolveEngine:
         Attempts a fast bounded structural mutation query against local Ollama if online.
         Falls back immediately (<350ms) if Ollama is offline or model is not yet pulled.
         """
+        online, installed = probe_ollama_models(self.ollama_endpoint)
+        if not online or not is_model_installed(model_tag, installed):
+            return None
         url = f"{self.ollama_endpoint.rstrip('/')}/api/generate"
         stones_summary = "; ".join(s.get("insight", "") for s in stepping_stones[:2])
         prompt = (
@@ -614,8 +624,9 @@ class ShinkaEvolveEngine:
         req = urllib.request.Request(
             url, data=body, method="POST", headers={"Content-Type": "application/json"}
         )
+        opener = build_no_proxy_opener()
         try:
-            with urllib.request.urlopen(req, timeout=0.45) as resp:
+            with opener.open(req, timeout=0.45) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8", errors="replace"))
                     raw = (data.get("response") or "").strip()
@@ -632,6 +643,8 @@ class ShinkaEvolveEngine:
         seed_candidate: EvolutionCandidate,
         generations: int = 4,
         elites_dir: Optional[Path] = None,
+        use_ollama_llm: bool = False,
+        progress_cb: Optional[Any] = None,
     ) -> List[EvolutionCandidate]:
         """Runs ShinkaEvolve structural search for `generations` steps."""
         self.novelty_archive.is_novel_and_register(
@@ -644,12 +657,15 @@ class ShinkaEvolveEngine:
             routed_model = self.ucb_router.select_model()
             stones = self.scratchpad.summarize_stepping_stones(top_k=3)
 
-            # First try live Ollama heavy model if responsive, else deterministic structural templates
             template_idx = (gen - 1) % len(SHINKA_STRUCTURAL_BREAKTHROUGHS)
             op_name, insight, structural_block = SHINKA_STRUCTURAL_BREAKTHROUGHS[template_idx]
 
-            llm_block = self._try_ollama_structural_mutation(
-                routed_model, best_so_far.evolve_block_code, stones
+            llm_block = (
+                self._try_ollama_structural_mutation(
+                    routed_model, best_so_far.evolve_block_code, stones
+                )
+                if use_ollama_llm
+                else None
             )
             if llm_block is not None:
                 candidate_block = llm_block
@@ -663,6 +679,11 @@ class ShinkaEvolveEngine:
 
             # ShinkaEvolve Novelty Rejection Gate
             if not self.novelty_archive.is_novel_and_register(fp, cand_id):
+                if progress_cb is not None:
+                    progress_cb(
+                        stage=f"ShinkaEvolve Gen {gen}/{generations}",
+                        detail=f"novelty-rejected | best={best_so_far.metrics.total_fitness:.1f}",
+                    )
                 continue
 
             mutated_source = replace_evolve_block(best_so_far.source_code, candidate_block)
@@ -704,6 +725,12 @@ class ShinkaEvolveEngine:
                     out_file = elites_dir / f"{cand_id}.py"
                     out_file.write_text(mutated_source, encoding="utf-8")
                     cand.file_path = str(out_file)
+
+            if progress_cb is not None:
+                progress_cb(
+                    stage=f"ShinkaEvolve Gen {gen}/{generations}",
+                    detail=f"model={routed_model} | best={best_so_far.metrics.total_fitness:.1f} | {best_so_far.metrics.execution_time_us:.1f}us",
+                )
 
         self.archive.sort(key=lambda c: c.metrics.total_fitness, reverse=True)
         return self.archive
@@ -859,12 +886,18 @@ class OpenEvolveEngine:
         self,
         generations: int = 4,
         elites_dir: Optional[Path] = None,
+        progress_cb: Optional[Any] = None,
     ) -> List[EvolutionCandidate]:
         """Executes multi-island MAP-Elites micro-mutations across all islands."""
         for gen in range(1, generations + 1):
             for island_idx in range(self.num_islands):
                 island_pop = self.islands[island_idx]
                 if not island_pop:
+                    if progress_cb is not None:
+                        progress_cb(
+                            stage=f"OpenEvolve Isl {island_idx + 1}/{self.num_islands} Gen {gen}/{generations}",
+                            detail=f"niches={len(self.map_elites.cells)}/16",
+                        )
                     continue
                 parent = max(island_pop, key=lambda c: c.metrics.total_fitness)
                 mut_idx = (gen + island_idx - 1) % len(OPENEVOLVE_MICRO_MUTATIONS)
@@ -898,6 +931,14 @@ class OpenEvolveEngine:
                         out_file.write_text(mutated_source, encoding="utf-8")
                         cand.file_path = str(out_file)
 
+                if progress_cb is not None:
+                    best_e = self.map_elites.best_elite()
+                    best_fit = best_e.metrics.total_fitness if best_e else 0.0
+                    progress_cb(
+                        stage=f"OpenEvolve Isl {island_idx + 1}/{self.num_islands} Gen {gen}/{generations}",
+                        detail=f"model={self.fast_mutation_model} | niches={len(self.map_elites.cells)}/16 | best={best_fit:.1f}",
+                    )
+
             # Island ring migration every 2 generations
             if gen % 2 == 0 and self.num_islands > 1:
                 migrants = [
@@ -922,21 +963,19 @@ def run_combined_shinka_openevolve(
     mode: str = "hybrid",  # "sequential" | "parallel" | "hybrid"
     generations: int = 4,
     num_islands: int = 3,
+    evolve_count: int = 1,
     elites_dir: Optional[str] = None,
     dynarot_decision: Optional[DynaRotRoutingDecision] = None,
+    show_progress: bool = False,
+    use_ollama_llm: bool = False,
 ) -> Dict[str, Any]:
     """
-    Executes the combined ShinkaEvolve + OpenEvolve pipeline:
-    - Evaluates the seed Python file with EVOLVE-BLOCK markers against the deterministic scorer.
-    - Uses ModelFusion DynaRot to split the compute budget:
-      * Heavy reasoning model (`shinka_heavy_reasoning_model`) -> ShinkaEvolve (UCB + Meta-Scratchpad + Novelty Rejection)
-      * Fast lightweight model (`openevolve_fast_mutation_model`) -> OpenEvolve (Multi-Island MAP-Elites grid)
-    - Supports:
-      * `sequential`: Stage 1 ShinkaEvolve discovery -> seed top elites -> Stage 2 OpenEvolve MAP-Elites fine-tuning
-      * `parallel`: Concurrent cross-pollinating ensemble sharing `elites_dir`
-      * `hybrid` (default): Sequential two-stage pipeline followed by a parallel cross-pollinating ensemble round
+    Executes `evolve_count` rounds of the combined ShinkaEvolve + OpenEvolve pipeline with
+    live `tqdm` percentage progress tracking across ShinkaEvolve discovery, OpenEvolve
+    multi-island MAP-Elites, and bidirectional cross-pollination.
     """
     t_start = time.perf_counter()
+    rounds = max(1, int(evolve_count))
     if dynarot_decision is None:
         router = DynaRotModelRouter()
         dynarot_decision = router.route(
@@ -957,112 +996,179 @@ def run_combined_shinka_openevolve(
     shared_elites_path = (
         Path(elites_dir).resolve()
         if elites_dir
-        else Path.cwd() / ".arxiv_to_code_elites" / arxiv_id.replace(".", "_")
+        else Path.cwd() / "generated" / f"arxiv_{arxiv_id.replace('.', '_')}" / "evolved" / "elites"
     )
     shared_elites_path.mkdir(parents=True, exist_ok=True)
 
-    # Evaluate baseline seed program
-    seed_metrics = evaluate_python_candidate(seed_python_code, candidate_id=f"seed-{arxiv_id}")
-    seed_block = extract_evolve_block(seed_python_code)
-    seed_candidate = EvolutionCandidate(
-        candidate_id=f"seed-{arxiv_id}",
-        engine_origin="seed",
-        generation=0,
-        model_used=dynarot_decision.primary_model,
-        mutation_operator="initial_paper2code_synthesis",
-        rationale="Initial grounded Python module generated from arXiv paper",
-        source_code=seed_python_code,
-        evolve_block_code=seed_block,
-        metrics=seed_metrics,
-        parent_ids=[],
-    )
-    seed_file = shared_elites_path / f"{seed_candidate.candidate_id}.py"
-    seed_file.write_text(seed_python_code, encoding="utf-8")
-    seed_candidate.file_path = str(seed_file)
-
-    shinka = ShinkaEvolveEngine(heavy_models=heavy_models)
-    openevolve = OpenEvolveEngine(fast_mutation_model=fast_model, num_islands=num_islands)
-
-    cross_pollination_events: List[Dict[str, Any]] = []
     mode_norm = mode.lower().strip()
-
+    par_gens = max(2, generations // 2)
+    per_round_steps = 0
     if mode_norm in ("sequential", "hybrid"):
-        # Stage 1: ShinkaEvolve Structural Discovery
-        shinka_elites = shinka.run_discovery(
-            seed_candidate=seed_candidate,
-            generations=generations,
-            elites_dir=shared_elites_path,
-        )
-        # Seed Stage 2 OpenEvolve directly with ShinkaEvolve's top-performing programs
-        top_shinka_seeds = shinka_elites[: max(2, num_islands)]
-        openevolve.seed_from_shinka_elites(top_shinka_seeds)
-        cross_pollination_events.append(
-            {
-                "direction": "ShinkaEvolve -> OpenEvolve (Stage 1 to Stage 2 Seeding)",
-                "seeded_candidates": [c.candidate_id for c in top_shinka_seeds],
-                "top_shinka_fitness": top_shinka_seeds[0].metrics.total_fitness,
-            }
-        )
-
-        # Stage 2: OpenEvolve Multi-Island MAP-Elites Fine-Tuning
-        openevolve.run_fine_tuning(
-            generations=generations,
-            elites_dir=shared_elites_path,
-        )
-
+        per_round_steps += generations + (generations * num_islands)
     if mode_norm in ("parallel", "hybrid"):
-        # Parallel Cross-Pollinating Ensemble sharing filesystem directory
-        if not openevolve.map_elites.cells:
-            openevolve.seed_from_shinka_elites([seed_candidate])
+        per_round_steps += par_gens + (par_gens * num_islands) + num_islands
+    total_steps = 1 + (rounds * max(1, per_round_steps))
 
-        lock = threading.Lock()
+    pbar_lock = threading.Lock()
+    pbar = create_progress_bar(
+        total=total_steps,
+        desc=f"Evolving arXiv:{arxiv_id} [{mode_norm} x{rounds}]",
+        unit="eval",
+        disable=not show_progress,
+    )
 
-        def _shinka_worker() -> List[EvolutionCandidate]:
-            start_cand = shinka.archive[0] if shinka.archive else seed_candidate
-            return shinka.run_discovery(
-                seed_candidate=start_cand,
-                generations=max(2, generations // 2),
-                elites_dir=shared_elites_path,
-            )
+    def _tick(stage: str, detail: str) -> None:
+        with pbar_lock:
+            pbar.set_description(stage)
+            pbar.set_postfix_str(detail)
+            pbar.update(1)
 
-        def _openevolve_worker() -> List[EvolutionCandidate]:
-            return openevolve.run_fine_tuning(
-                generations=max(2, generations // 2),
-                elites_dir=shared_elites_path,
-            )
+    round_history: List[Dict[str, Any]] = []
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            f_shinka = pool.submit(_shinka_worker)
-            f_open = pool.submit(_openevolve_worker)
-            s_res = f_shinka.result()
-            o_res = f_open.result()
+    try:
+        # Evaluate baseline seed program
+        seed_metrics = evaluate_python_candidate(seed_python_code, candidate_id=f"seed-{arxiv_id}")
+        _tick(
+            stage="Baseline Seed Eval",
+            detail=f"fitness={seed_metrics.total_fitness:.1f} | {seed_metrics.execution_time_us:.1f}us",
+        )
+        seed_block = extract_evolve_block(seed_python_code)
+        seed_candidate = EvolutionCandidate(
+            candidate_id=f"seed-{arxiv_id}",
+            engine_origin="seed",
+            generation=0,
+            model_used=dynarot_decision.primary_model,
+            mutation_operator="initial_paper2code_synthesis",
+            rationale="Initial grounded Python module generated from arXiv paper",
+            source_code=seed_python_code,
+            evolve_block_code=seed_block,
+            metrics=seed_metrics,
+            parent_ids=[],
+        )
+        seed_file = shared_elites_path / f"{seed_candidate.candidate_id}.py"
+        seed_file.write_text(seed_python_code, encoding="utf-8")
+        seed_candidate.file_path = str(seed_file)
 
-        # Bidirectional Cross-Pollination Exchange
-        with lock:
-            best_open = openevolve.map_elites.best_elite()
-            if best_open is not None:
-                injected = shinka.ingest_cross_pollinated_elite(best_open)
+        shinka = ShinkaEvolveEngine(heavy_models=heavy_models)
+        openevolve = OpenEvolveEngine(fast_mutation_model=fast_model, num_islands=num_islands)
+        cross_pollination_events: List[Dict[str, Any]] = []
+        current_seed = seed_candidate
+
+        for round_idx in range(1, rounds + 1):
+            round_prefix = f"R{round_idx}/{rounds} " if rounds > 1 else ""
+
+            def _round_tick(stage: str, detail: str, _pref: str = round_prefix) -> None:
+                _tick(stage=f"{_pref}{stage}", detail=detail)
+
+            if mode_norm in ("sequential", "hybrid"):
+                # Stage 1: ShinkaEvolve Structural Discovery
+                shinka_elites = shinka.run_discovery(
+                    seed_candidate=current_seed,
+                    generations=generations,
+                    elites_dir=shared_elites_path,
+                    use_ollama_llm=use_ollama_llm,
+                    progress_cb=_round_tick,
+                )
+                # Seed Stage 2 OpenEvolve directly with ShinkaEvolve's top-performing programs
+                top_shinka_seeds = shinka_elites[: max(2, num_islands)]
+                openevolve.seed_from_shinka_elites(top_shinka_seeds)
                 cross_pollination_events.append(
                     {
-                        "direction": "OpenEvolve -> ShinkaEvolve (Archive & Meta-Scratchpad Stepping Stone)",
-                        "candidate_id": best_open.candidate_id,
-                        "niche_label": best_open.metrics.niche_label,
-                        "fitness": best_open.metrics.total_fitness,
-                        "accepted_as_novel": injected,
+                        "round": round_idx,
+                        "direction": "ShinkaEvolve -> OpenEvolve (Stage 1 to Stage 2 Seeding)",
+                        "seeded_candidates": [c.candidate_id for c in top_shinka_seeds],
+                        "top_shinka_fitness": top_shinka_seeds[0].metrics.total_fitness,
                     }
                 )
-            if s_res:
-                best_shinka = s_res[0]
-                openevolve.seed_from_shinka_elites([best_shinka])
-                cross_pollination_events.append(
-                    {
-                        "direction": "ShinkaEvolve -> OpenEvolve (Island Stagnation Prevention Leap)",
-                        "candidate_id": best_shinka.candidate_id,
-                        "fitness": best_shinka.metrics.total_fitness,
-                    }
+
+                # Stage 2: OpenEvolve Multi-Island MAP-Elites Fine-Tuning
+                openevolve.run_fine_tuning(
+                    generations=generations,
+                    elites_dir=shared_elites_path,
+                    progress_cb=_round_tick,
                 )
-                # Final post-pollination micro-mutation pass
-                openevolve.run_fine_tuning(generations=1, elites_dir=shared_elites_path)
+
+            if mode_norm in ("parallel", "hybrid"):
+                # Parallel Cross-Pollinating Ensemble sharing filesystem directory
+                if not openevolve.map_elites.cells:
+                    openevolve.seed_from_shinka_elites([current_seed])
+
+                lock = threading.Lock()
+
+                def _shinka_worker() -> List[EvolutionCandidate]:
+                    start_cand = shinka.archive[0] if shinka.archive else current_seed
+                    return shinka.run_discovery(
+                        seed_candidate=start_cand,
+                        generations=par_gens,
+                        elites_dir=shared_elites_path,
+                        use_ollama_llm=use_ollama_llm,
+                        progress_cb=_round_tick,
+                    )
+
+                def _openevolve_worker() -> List[EvolutionCandidate]:
+                    return openevolve.run_fine_tuning(
+                        generations=par_gens,
+                        elites_dir=shared_elites_path,
+                        progress_cb=_round_tick,
+                    )
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    f_shinka = pool.submit(_shinka_worker)
+                    f_open = pool.submit(_openevolve_worker)
+                    s_res = f_shinka.result()
+                    o_res = f_open.result()
+
+                # Bidirectional Cross-Pollination Exchange
+                with lock:
+                    best_open = openevolve.map_elites.best_elite()
+                    if best_open is not None:
+                        injected = shinka.ingest_cross_pollinated_elite(best_open)
+                        cross_pollination_events.append(
+                            {
+                                "round": round_idx,
+                                "direction": "OpenEvolve -> ShinkaEvolve (Archive & Meta-Scratchpad Stepping Stone)",
+                                "candidate_id": best_open.candidate_id,
+                                "niche_label": best_open.metrics.niche_label,
+                                "fitness": best_open.metrics.total_fitness,
+                                "accepted_as_novel": injected,
+                            }
+                        )
+                    if s_res:
+                        best_shinka = s_res[0]
+                        openevolve.seed_from_shinka_elites([best_shinka])
+                        cross_pollination_events.append(
+                            {
+                                "round": round_idx,
+                                "direction": "ShinkaEvolve -> OpenEvolve (Island Stagnation Prevention Leap)",
+                                "candidate_id": best_shinka.candidate_id,
+                                "fitness": best_shinka.metrics.total_fitness,
+                            }
+                        )
+                        # Final post-pollination micro-mutation pass
+                        openevolve.run_fine_tuning(
+                            generations=1,
+                            elites_dir=shared_elites_path,
+                            progress_cb=_round_tick,
+                        )
+
+            # Carry best candidate forward to next --evolve-count round
+            round_pool = [seed_candidate, *shinka.archive, *openevolve.map_elites.all_elites_sorted()]
+            current_seed = max(
+                round_pool,
+                key=lambda c: (c.metrics.total_fitness, -c.metrics.execution_time_us),
+            )
+            round_history.append(
+                {
+                    "round": round_idx,
+                    "best_candidate_id": current_seed.candidate_id,
+                    "best_fitness": current_seed.metrics.total_fitness,
+                    "execution_time_us": current_seed.metrics.execution_time_us,
+                    "peak_memory_kib": current_seed.metrics.peak_memory_kib,
+                    "occupied_map_elites_niches": len(openevolve.map_elites.cells),
+                }
+            )
+    finally:
+        pbar.close()
 
     all_candidates = {c.candidate_id: c for c in shinka.archive}
     for c in openevolve.map_elites.all_elites_sorted():
@@ -1075,7 +1181,8 @@ def run_combined_shinka_openevolve(
         reverse=True,
     )
     champion = sorted_all[0]
-    champion_path = shared_elites_path / f"champion_arxiv_{arxiv_id.replace('.', '_')}.py"
+    champion_path = shared_elites_path.parent / f"champion_arxiv_{arxiv_id.replace('.', '_')}.py"
+    champion_path.parent.mkdir(parents=True, exist_ok=True)
     champion_path.write_text(champion.source_code, encoding="utf-8")
     champion.file_path = str(champion_path)
 
@@ -1084,6 +1191,8 @@ def run_combined_shinka_openevolve(
     return {
         "arxiv_id": arxiv_id,
         "evolve_mode": mode_norm,
+        "evolve_count": rounds,
+        "round_history": round_history,
         "evolve_block_convention_verified": True,
         "shared_elites_directory": str(shared_elites_path),
         "champion_file_path": str(champion_path),

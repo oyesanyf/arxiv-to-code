@@ -36,11 +36,18 @@ from .langextract_engine import (
     compute_article_rank,
     extract_grounded_breakouts,
     extract_text_from_document_path,
+    extract_with_google_langextract_llm,
     fetch_paper_by_id,
     generate_interactive_html,
     normalize_arxiv_id,
     search_and_rank_articles,
     search_breakout_papers,
+)
+from .llm_verifier import (
+    CodeVerificationReport,
+    parse_llm_verification_json,
+    run_deterministic_code_verification,
+    verify_generated_python_code,
 )
 from .models import (
     CandidateScoreMetrics,
@@ -60,6 +67,7 @@ __all__ = [
     "BREAKOUT_SIGNATURES",
     "CODEBASE_IMPLEMENTED_PAPERS",
     "CandidateScoreMetrics",
+    "CodeVerificationReport",
     "DEFENSE_COUNTERMEASURE_SIGNATURES",
     "DynaRotModelRouter",
     "DynaRotRoutingDecision",
@@ -82,9 +90,11 @@ __all__ = [
     "fetch_paper_by_id",
     "generate_interactive_html",
     "normalize_arxiv_id",
+    "parse_llm_verification_json",
     "probe_ollama_models",
     "replace_evolve_block",
     "run_combined_shinka_openevolve",
+    "run_deterministic_code_verification",
     "run_langgraph_research_swarm",
     "sanitize_model_tag",
     "search_and_rank_articles",
@@ -93,4 +103,5 @@ __all__ = [
     "synthesize_deterministic_scoring_script",
     "synthesize_production_code",
     "synthesize_production_python_code",
+    "verify_generated_python_code",
 ]

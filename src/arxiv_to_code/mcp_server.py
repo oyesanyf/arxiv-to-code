@@ -23,28 +23,48 @@ logging.basicConfig(stream=sys.stderr, level=logging.WARNING, force=True)
 for _logger_name in ("arxiv", "httpx", "httpcore", "urllib3", "langextract", "mcp"):
     logging.getLogger(_logger_name).setLevel(logging.WARNING)
 
-try:
-    from mcp.server.mcpserver import MCPServer as _MCPServerClass  # type: ignore
-except ImportError:
-    try:
-        from mcp.server.fastmcp import FastMCP as _MCPServerClass  # type: ignore
-    except ImportError:
+class _LazyMCPServerRegistry:
+    """
+    Zero-overhead tool decorator registry that avoids importing heavy pydantic/anyio/uvicorn
+    dependencies during CLI or pytest startup, and binds to the real MCPServer only when
+    `run(transport="stdio")` is invoked.
+    """
 
-        class _MCPServerClass:  # type: ignore[no-redef]
-            def __init__(self, name: str) -> None:
-                self.name = name
-                self.tools: Dict[str, Callable[..., Any]] = {}
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.tools: Dict[str, Callable[..., Any]] = {}
 
-            def tool(self) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-                def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-                    self.tools[fn.__name__] = fn
-                    return fn
+    def tool(self) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            self.tools[fn.__name__] = fn
+            return fn
 
-                return decorator
+        return decorator
 
-            def run(self, transport: str = "stdio") -> None:
-                sys.stderr.write(f"[{self.name}] Minimal stdio MCP fallback loop started ({transport}).\n")
-                sys.stderr.flush()
+    def run(self, transport: str = "stdio") -> None:
+        real_server = None
+        try:
+            from mcp.server.mcpserver import MCPServer as _RealMCPServer  # type: ignore
+
+            real_server = _RealMCPServer(self.name)
+        except ImportError:
+            try:
+                from mcp.server.fastmcp import FastMCP as _RealFastMCP  # type: ignore
+
+                real_server = _RealFastMCP(self.name)
+            except ImportError:
+                real_server = None
+
+        if real_server is not None:
+            for fn in self.tools.values():
+                real_server.tool()(fn)
+            real_server.run(transport=transport)
+        else:
+            sys.stderr.write(f"[{self.name}] Minimal stdio MCP fallback loop started ({transport}).\n")
+            sys.stderr.flush()
+
+
+_MCPServerClass = _LazyMCPServerRegistry
 
 from .dynarot import DynaRotModelRouter
 from .evolve_engine import run_combined_shinka_openevolve
@@ -61,6 +81,7 @@ from .langextract_engine import (
     normalize_arxiv_id,
     search_and_rank_articles,
 )
+from .llm_verifier import verify_generated_python_code as _verify_generated_python_code_impl
 from .python_code_generator import synthesize_production_python_code
 from .swarm import run_langgraph_research_swarm
 
@@ -222,11 +243,14 @@ async def search_and_rank_arxiv_papers(
 async def extract_document_langextract(
     arxiv_id_or_path: str = "2603.02277",
     output_html_path: str = "",
+    use_google_langextract_llm: bool = False,
+    langextract_model_id: str = "",
 ) -> str:
     """
     Extracts 3-class source-grounded spans (`breakout_vector`, `mathematical_formulation`,
     `defense_countermeasure`) with exact character intervals (`CharInterval(start_pos, end_pos)`)
-    from an arXiv paper ID or local document path (.pdf, .txt, .md, .tex) using Google LangExtract,
+    from an arXiv paper ID or local document path (.pdf, .txt, .md, .tex) using Google LangExtract
+    (`langextract.extract()` when `use_google_langextract_llm=True` + `langextract.visualize()`),
     and optionally generates an interactive HTML visualization report.
     """
     try:
@@ -251,7 +275,11 @@ async def extract_document_langextract(
                 return json.dumps({"error": f"Paper or file not found: {arxiv_id_or_path}"}, indent=2)
             paper = fetched
 
-        extractions, annotated_doc = extract_grounded_breakouts(paper)
+        extractions, annotated_doc = extract_grounded_breakouts(
+            paper,
+            use_llm_extract=bool(use_google_langextract_llm),
+            llm_model_id=langextract_model_id.strip() or None,
+        )
         rank_info = compute_article_rank(paper, extractions)
 
         saved_html = None
@@ -286,12 +314,14 @@ async def generate_python_code_from_paper(
     evolve: bool = False,
     evolve_mode: str = "hybrid",
     generations: int = 4,
+    verify_llm: bool = False,
+    verify_model: str = "",
 ) -> str:
     """
     Fetch an arXiv paper by ID (e.g. '2608.15888' or '2603.02277'), run Google LangExtract
     3-class character-interval source grounding, synthesize complete production Python code
-    with `# EVOLVE-BLOCK-START` / `# EVOLVE-BLOCK-END` markers and unit tests, and optionally
-    evolve it with ShinkaEvolve + OpenEvolve.
+    with `# EVOLVE-BLOCK-START` / `# EVOLVE-BLOCK-END` markers and unit tests, optionally
+    evolve it with ShinkaEvolve + OpenEvolve, and optionally verify it with an LLM judge.
     """
     try:
         clean_id = normalize_arxiv_id(arxiv_id)
@@ -324,6 +354,23 @@ async def generate_python_code_from_paper(
                 dynarot_decision=dynarot_decision,
             )
 
+        verification_report = None
+        if verify_llm:
+            target_code = (
+                evolution_report["champion_candidate"]["source_code"]
+                if evolution_report is not None
+                else code_bundle["production_python_code"]
+            )
+            verification_report = _verify_generated_python_code_impl(
+                source_code=target_code,
+                paper=paper,
+                extractions=extractions,
+                code_stage="evolved_champion" if evolution_report is not None else "synthesized",
+                model_id=verify_model.strip() or None,
+                dynarot_decision=dynarot_decision,
+                enable_llm=True,
+            ).to_dict()
+
         return json.dumps(
             {
                 "arxiv_id": paper["arxiv_id"],
@@ -334,6 +381,7 @@ async def generate_python_code_from_paper(
                 "grounded_extractions": extractions,
                 "generated_python_code": code_bundle,
                 "evolution_report": evolution_report,
+                "verification_report": verification_report,
                 "printable_code_bundle_markdown": code_bundle["printable_code_bundle_markdown"],
             },
             indent=2,
@@ -353,11 +401,12 @@ async def evolve_python_code(
     evolve_mode: str = "hybrid",
     generations: int = 4,
     num_islands: int = 3,
+    evolve_count: int = 1,
     elites_dir: str = "",
 ) -> str:
     """
-    Runs the combined ShinkaEvolve + OpenEvolve evolutionary search pipeline on a standalone
-    Python file (or synthesizes one from `arxiv_id` first if `python_source_code` is omitted).
+    Runs `evolve_count` cycles of the combined ShinkaEvolve + OpenEvolve evolutionary search pipeline
+    on a standalone Python file (or synthesizes one from `arxiv_id` first if `python_source_code` is omitted).
     Supports `sequential` (Stage 1 ShinkaEvolve -> Stage 2 OpenEvolve MAP-Elites),
     `parallel` (cross-pollinating ensemble sharing `elites_dir`), and `hybrid` modes.
     """
@@ -381,6 +430,7 @@ async def evolve_python_code(
             mode=evolve_mode,
             generations=max(1, int(generations)),
             num_islands=max(1, int(num_islands)),
+            evolve_count=max(1, int(evolve_count)),
             elites_dir=elites_dir.strip() or None,
             dynarot_decision=dynarot_decision,
         )
@@ -450,6 +500,51 @@ async def run_langgraph_arxiv_to_code_swarm(
         return json.dumps({"error": str(exc), "arxiv_id": arxiv_id}, indent=2)
 
 
+# =============================================================================
+# Tool 9: verify_generated_python_code
+# =============================================================================
+
+@server.tool()
+async def verify_generated_python_code(
+    arxiv_id: str = "2603.02277",
+    python_source_code: str = "",
+    verify_model: str = "",
+    enable_llm: bool = True,
+) -> str:
+    """
+    Verifies generated or evolved Python code against the arXiv paper's grounded spans,
+    mathematical formulations, and security invariants using a fail-closed Deterministic AST +
+    Runtime Test Gate combined with an Open-Weight LLM-as-a-Judge (local Ollama via ModelFusion DynaRot).
+    """
+    try:
+        clean_id = normalize_arxiv_id(arxiv_id) or "2603.02277"
+        paper = fetch_paper_by_id(clean_id)
+        if not paper:
+            paper = {
+                "arxiv_id": clean_id,
+                "title": f"Custom Verification Target ({clean_id})",
+                "summary": "",
+            }
+        extractions, _ = extract_grounded_breakouts(paper)
+        code_stage = "custom"
+        if not python_source_code.strip():
+            bundle = synthesize_production_python_code(paper, extractions)
+            python_source_code = bundle["production_python_code"]
+            code_stage = "synthesized"
+
+        report = _verify_generated_python_code_impl(
+            source_code=python_source_code,
+            paper=paper,
+            extractions=extractions,
+            code_stage=code_stage,
+            model_id=verify_model.strip() or None,
+            enable_llm=bool(enable_llm),
+        )
+        return json.dumps(report.to_dict(), indent=2)
+    except Exception as exc:
+        return json.dumps({"error": str(exc), "arxiv_id": arxiv_id}, indent=2)
+
+
 def build_mcp_arg_parser() -> "argparse.ArgumentParser":
     import argparse
 
@@ -458,12 +553,12 @@ def build_mcp_arg_parser() -> "argparse.ArgumentParser":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "ArXiv-to-Code Universal MCP Server (stdio JSON-RPC 2.0)\n"
-            "Exposes 8 specialized tools for arXiv search, 3-class Google LangExtract character-span\n"
+            "Exposes 9 specialized tools for arXiv search, 3-class Google LangExtract character-span\n"
             "grounding, Paper-to-Python code synthesis, ModelFusion DynaRot hardware-aware routing,\n"
-            "and combined ShinkaEvolve + OpenEvolve evolutionary search."
+            "combined ShinkaEvolve + OpenEvolve evolutionary search, and LLM-based code verification."
         ),
         epilog=(
-            "Registered MCP Tools (8 Tools):\n"
+            "Registered MCP Tools (9 Tools):\n"
             "  1. arxiv_to_code_status              : Health, versions, active DynaRot tier & ranking weights\n"
             "  2. dynarot_hardware_route_and_install: Live free RAM/VRAM probe, Pareto knee-point & ollama pull\n"
             "  3. search_and_rank_arxiv_papers      : Search arXiv, 3-class LangExtract grounding & Python codegen\n"
@@ -472,12 +567,13 @@ def build_mcp_arg_parser() -> "argparse.ArgumentParser":
             "  6. evolve_python_code                : Run ShinkaEvolve + OpenEvolve (sequential | parallel | hybrid)\n"
             "  7. audit_defense_coverage            : Audit paper vectors across Python & multi-ring boundaries\n"
             "  8. run_langgraph_arxiv_to_code_swarm : Execute 4-Arm HMAC-SHA256 signed StateGraph Research Swarm\n"
+            "  9. verify_generated_python_code      : Verify generated Python code via Deterministic Gate + LLM Judge\n"
         ),
     )
     parser.add_argument(
         "--list-tools",
         action="store_true",
-        help="Print JSON catalog of all 8 registered MCP tools and exit",
+        help="Print JSON catalog of all 9 registered MCP tools and exit",
     )
     parser.add_argument(
         "-V",
@@ -502,12 +598,13 @@ def main(argv: Optional[List[str]] = None) -> None:
             {"name": "evolve_python_code", "description": evolve_python_code.__doc__.strip()},
             {"name": "audit_defense_coverage", "description": audit_defense_coverage.__doc__.strip()},
             {"name": "run_langgraph_arxiv_to_code_swarm", "description": run_langgraph_arxiv_to_code_swarm.__doc__.strip()},
+            {"name": "verify_generated_python_code", "description": verify_generated_python_code.__doc__.strip()},
         ]
-        print(json.dumps({"server": "arxiv-to-code", "total_tools": 8, "tools": tools_catalog}, indent=2))
+        print(json.dumps({"server": "arxiv-to-code", "total_tools": 9, "tools": tools_catalog}, indent=2))
         return
 
     sys.stderr.write(
-        "Starting ArXiv-to-Code + Google LangExtract + ModelFusion DynaRot + ShinkaEvolve/OpenEvolve MCP Server on stdio (8 Tools Registered)...\n"
+        "Starting ArXiv-to-Code + Google LangExtract + ModelFusion DynaRot + ShinkaEvolve/OpenEvolve + LLM Verifier MCP Server on stdio (9 Tools Registered)...\n"
     )
     sys.stderr.flush()
     server.run(transport="stdio")

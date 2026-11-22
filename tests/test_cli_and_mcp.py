@@ -16,6 +16,7 @@ from arxiv_to_code.mcp_server import (
     main as mcp_main,
     run_langgraph_arxiv_to_code_swarm,
     search_and_rank_arxiv_papers,
+    verify_generated_python_code,
 )
 
 
@@ -25,7 +26,8 @@ def test_cli_and_mcp_help_documentation(capsys) -> None:
     assert "2. Google LangExtract 3-Class Source Grounding" in cli_help
     assert "4. ModelFusion DynaRot Hardware Sizing" in cli_help
     assert "5. Combined ShinkaEvolve + OpenEvolve Evolutionary Search" in cli_help
-    assert "--evolve, --evolves, --evoves" in cli_help
+    assert "--evolves, --evolve, --evoves" in cli_help
+    assert "--search QUERY, --searct QUERY" in cli_help
     assert "--install-models" in cli_help
 
     mcp_help = build_mcp_arg_parser().format_help()
@@ -36,7 +38,7 @@ def test_cli_and_mcp_help_documentation(capsys) -> None:
     mcp_main(["--list-tools"])
     captured = capsys.readouterr().out
     catalog = json.loads(captured)
-    assert catalog["total_tools"] == 8
+    assert catalog["total_tools"] == 9
 
 
 def test_cli_flags_evolve_and_dynarot(tmp_path: Path) -> None:
@@ -44,7 +46,7 @@ def test_cli_flags_evolve_and_dynarot(tmp_path: Path) -> None:
     rc_dyn = cli_main(["--dynarot"])
     assert rc_dyn == 0
 
-    # 2. Test --arxiv-id with --evolves and --output-dir
+    # 2. Test --arxiv-id with --evolves, --evolve-count 2, and organized --output-dir
     out_dir = tmp_path / "cli_out"
     rc_evo = cli_main(
         [
@@ -53,19 +55,45 @@ def test_cli_flags_evolve_and_dynarot(tmp_path: Path) -> None:
             "--evolves",
             "--evolve-mode",
             "hybrid",
+            "--evolve-count",
+            "2",
             "--generations",
             "2",
             "--output-dir",
             str(out_dir),
+            "--no-progress",
         ]
     )
     assert rc_evo == 0
-    assert (out_dir / "arxiv_2608_15888_module.py").exists()
-    assert (out_dir / "champion_arxiv_2608_15888.py").exists()
+    assert (out_dir / "INDEX.md").exists()
+    assert (out_dir / "MANIFEST.json").exists()
+    assert len(list(out_dir.glob("arxiv_2608_15888_*/src/arxiv_2608_15888_module.py"))) == 1
+    assert len(list(out_dir.glob("arxiv_2608_15888_*/evolved/champion_arxiv_2608_15888.py"))) == 1
+    assert len(list(out_dir.glob("arxiv_2608_15888_*/langextract_report.html"))) == 1
+    assert len(list(out_dir.glob("arxiv_2608_15888_*/extraction_results.jsonl"))) == 1
 
-    # 3. Test --evoves spelling alias
-    rc_alias = cli_main(["--arxiv-id", "2603.02277", "--evoves", "--generations", "2"])
-    assert rc_alias == 0
+    # 3. Test --searct, ---evolves (triple-dash), --evolve-mode hybrid, --status, --list-tools, --audit
+    rc_typo_flags = cli_main(
+        [
+            "--searct",
+            "container sandbox escape",
+            "--max-results",
+            "1",
+            "---evolves",
+            "--evolve-mode",
+            "hybrid",
+            "--generations",
+            "2",
+            "--output-dir",
+            str(tmp_path / "typo_out"),
+            "--no-progress",
+        ]
+    )
+    assert rc_typo_flags == 0
+
+    assert cli_main(["--status"]) == 0
+    assert cli_main(["--list-tools"]) == 0
+    assert cli_main(["--audit", "--arxiv-id", "2603.02277"]) == 0
 
 
 def test_all_8_mcp_tools(tmp_path: Path) -> None:
@@ -153,3 +181,9 @@ def test_all_8_mcp_tools(tmp_path: Path) -> None:
     sw_data = json.loads(sw_raw)
     assert sw_data["stopping_reason"] == "Converged_PostEvolutionVerified_100PercentCoverage"
     assert sw_data["verification_completed"] is True
+
+    # Tool 9: verify_generated_python_code
+    ver_raw = asyncio.run(verify_generated_python_code(arxiv_id="2608.15888", enable_llm=False))
+    ver_data = json.loads(ver_raw)
+    assert ver_data["verdict"] == "PASS"
+    assert ver_data["deterministic_checks"]["runtime_tests_passed"] == 4

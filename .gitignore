@@ -19,6 +19,7 @@ wheels/
 .installed.cfg
 *.egg
 .pytest_cache/
+.pytest_tmp/
 .coverage
 htmlcov/
 .env
@@ -26,5 +27,6 @@ htmlcov/
 env/
 venv/
 target/
+generated/
 .arxiv_to_code_elites/
 *.html

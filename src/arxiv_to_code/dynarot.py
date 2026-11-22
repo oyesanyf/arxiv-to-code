@@ -27,6 +27,7 @@ import os
 import platform
 import shutil
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -212,35 +213,73 @@ def _detect_windows_ram_gb() -> Tuple[float, float]:
         return 16.0, 12.0
 
 
+def build_no_proxy_opener() -> urllib.request.OpenerDirector:
+    """
+    Returns an urllib opener that explicitly bypasses OS/Windows proxy auto-discovery
+    (`ProxyHandler({})`) so local loopback requests to `127.0.0.1:11434` never stall
+    on WPAD/WinReg lookup or route through a corporate proxy.
+    """
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _detect_gpu_vram() -> Tuple[Optional[str], float, float]:
-    """Detects GPU name, total VRAM (GB), and free VRAM (GB) via nvidia-smi."""
+    """
+    Detects GPU name, total VRAM (GB), and free VRAM (GB) via nvidia-smi with a hard
+    1.0s non-blocking daemon timeout so Windows pipe handle stalls can never hang startup.
+    """
     if not shutil.which("nvidia-smi"):
         return None, 0.0, 0.0
-    try:
-        creationflags = 0x08000000 if platform.system() == "Windows" else 0
-        proc = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=name,memory.total,memory.free",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=1.5,
-            creationflags=creationflags,
-        )
-        if proc.returncode == 0 and proc.stdout.strip():
-            first_line = proc.stdout.strip().splitlines()[0]
-            parts = [p.strip() for p in first_line.split(",")]
-            if len(parts) >= 3:
-                name = parts[0]
-                total_gb = round(float(parts[1]) / 1024.0, 2)
-                free_gb = round(float(parts[2]) / 1024.0, 2)
-                return name, total_gb, free_gb
-    except Exception:
-        pass
-    return None, 0.0, 0.0
+
+    result_box: List[Tuple[Optional[str], float, float]] = []
+    proc_holder: List[Any] = []
+
+    def _worker() -> None:
+        try:
+            creationflags = 0x08000000 if platform.system() == "Windows" else 0
+            proc = subprocess.Popen(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=name,memory.total,memory.free",
+                    "--format=csv,noheader,nounits",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=creationflags,
+            )
+            proc_holder.append(proc)
+            stdout, _ = proc.communicate(timeout=0.9)
+            if proc.returncode == 0 and stdout and stdout.strip():
+                first_line = stdout.strip().splitlines()[0]
+                parts = [p.strip() for p in first_line.split(",")]
+                if len(parts) >= 3:
+                    name = parts[0]
+                    total_gb = round(float(parts[1]) / 1024.0, 2)
+                    free_gb = round(float(parts[2]) / 1024.0, 2)
+                    result_box.append((name, total_gb, free_gb))
+        except Exception:
+            if proc_holder:
+                try:
+                    proc_holder[0].kill()
+                except Exception:
+                    pass
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    thread.join(timeout=1.0)
+    if thread.is_alive() and proc_holder:
+        try:
+            proc_holder[0].kill()
+        except Exception:
+            pass
+    return result_box[0] if result_box else (None, 0.0, 0.0)
+
+
+_HARDWARE_CACHE: Optional[Tuple[float, SystemHardwareResources]] = None
+_OLLAMA_PROBE_CACHE: Dict[str, Tuple[float, bool, List[str]]] = {}
 
 
 def detect_live_hardware(
@@ -249,11 +288,43 @@ def detect_live_hardware(
 ) -> SystemHardwareResources:
     """
     Probes live available system RAM and GPU VRAM at runtime.
-    Never sizes against total RAM when free RAM is available.
+    Caches hardware detection for 30 seconds within the process (matching ModelFusion's
+    OnceLock SYSTEM_MEMORY_CACHE) so repeated routing calls never block on subprocess spawns.
     """
-    total_ram_gb, free_ram_gb = _detect_windows_ram_gb()
-    gpu_name, gpu_vram_total_gb, gpu_vram_free_gb = _detect_gpu_vram()
-    cpu_cores = os.cpu_count() or 4
+    global _HARDWARE_CACHE
+    now = time.monotonic()
+    if (
+        override_free_ram_gb is None
+        and override_free_vram_mb is None
+        and _HARDWARE_CACHE is not None
+        and (now - _HARDWARE_CACHE[0]) < 30.0
+    ):
+        return _HARDWARE_CACHE[1]
+
+    if _HARDWARE_CACHE is not None and (now - _HARDWARE_CACHE[0]) < 30.0:
+        base_hw = _HARDWARE_CACHE[1]
+        total_ram_gb, free_ram_gb = base_hw.total_ram_gb, base_hw.free_ram_gb
+        gpu_name, gpu_vram_total_gb, gpu_vram_free_gb = (
+            base_hw.gpu_name,
+            base_hw.gpu_vram_total_gb,
+            base_hw.gpu_vram_free_gb,
+        )
+        cpu_cores = base_hw.cpu_cores
+    else:
+        total_ram_gb, free_ram_gb = _detect_windows_ram_gb()
+        gpu_name, gpu_vram_total_gb, gpu_vram_free_gb = _detect_gpu_vram()
+        cpu_cores = os.cpu_count() or 4
+        _HARDWARE_CACHE = (
+            now,
+            SystemHardwareResources(
+                total_ram_gb=total_ram_gb,
+                free_ram_gb=free_ram_gb,
+                cpu_cores=cpu_cores,
+                gpu_name=gpu_name,
+                gpu_vram_total_gb=gpu_vram_total_gb,
+                gpu_vram_free_gb=gpu_vram_free_gb,
+            ),
+        )
 
     if override_free_ram_gb is not None:
         free_ram_gb = float(override_free_ram_gb)
@@ -498,13 +569,21 @@ def select_knee_point(front: List[ParetoCandidate], directions: Optional[List[st
 
 def probe_ollama_models(endpoint: str = "http://127.0.0.1:11434", timeout_sec: float = 0.4) -> Tuple[bool, List[str]]:
     """
-    Probes Ollama `/api/tags` with a strict 400ms timeout (Fast Timeout & Zero-Crash Fallback Law).
+    Probes Ollama `/api/tags` with a strict 400ms timeout (Fast Timeout & Zero-Crash Fallback Law)
+    and explicit no-proxy opener so Windows proxy resolution can never stall loopback probes.
+    Caches result for 15 seconds within the process.
     Returns (is_online, list_of_installed_model_tags).
     """
+    now = time.monotonic()
+    cached = _OLLAMA_PROBE_CACHE.get(endpoint)
+    if cached is not None and (now - cached[0]) < 15.0:
+        return cached[1], list(cached[2])
+
     url = f"{endpoint.rstrip('/')}/api/tags"
     req = urllib.request.Request(url, headers={"User-Agent": "ArxivToCode-DynaRot/1.0", "Origin": "null"})
+    opener = build_no_proxy_opener()
     try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        with opener.open(req, timeout=timeout_sec) as resp:
             if resp.status == 200:
                 payload = json.loads(resp.read().decode("utf-8", errors="replace"))
                 models = [
@@ -512,9 +591,11 @@ def probe_ollama_models(endpoint: str = "http://127.0.0.1:11434", timeout_sec: f
                     for m in payload.get("models", [])
                     if m.get("name")
                 ]
+                _OLLAMA_PROBE_CACHE[endpoint] = (now, True, models)
                 return True, models
     except Exception:
         pass
+    _OLLAMA_PROBE_CACHE[endpoint] = (now, False, [])
     return False, []
 
 

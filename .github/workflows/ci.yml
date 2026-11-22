@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    name: Python 3.12 Pytest & 8-Step Self-Test
+    name: Python 3.12 Pytest, 9-Step Self-Test & LLM Verifier CI
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -24,10 +24,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e . pytest
 
-      - name: Run 8-Step Functional Self-Test Suite
+      - name: Run 9-Step Functional Self-Test Suite
         run: |
-          python cli.py --test
+          python arixv_to_code.py --test
 
       - name: Run Pytest Verification Suite
         run: |
-          pytest -v tests/
+          python arixv_to_code.py --pytest
+
+      - name: Verify Organized Workspace + Evolution + LLM Verifier CLI
+        run: |
+          python arixv_to_code.py --arxiv-id 2608.15888 --evolves --evolve-count 2 --generations 2 --islands 2 --verify-llm --no-progress
+          test -f generated/INDEX.md
+          test -f generated/MANIFEST.json

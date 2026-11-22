@@ -1,6 +1,6 @@
 # ArXiv-to-Code Universal MCP Server Guide
 
-The **ArXiv-to-Code MCP Server** (`mcp_server.py` or `python cli.py --mcp`) exposes **8 specialized tools** over the Model Context Protocol (stdio JSON-RPC 2.0), enabling any AI IDE or desktop agent (Google Antigravity, Cursor, VS Code, Windsurf, Claude Desktop, Zed) to search arXiv, run 3-class Google LangExtract grounding, synthesize production Python code, route/install local models via ModelFusion DynaRot, and evolve code with `ShinkaEvolve` + `OpenEvolve`.
+The **ArXiv-to-Code MCP Server** (`mcp_server.py` or `python arixv_to_code.py --mcp`) exposes **9 specialized tools** over the Model Context Protocol (stdio JSON-RPC 2.0), enabling any AI IDE or desktop agent (Google Antigravity, Cursor, VS Code, Windsurf, Claude Desktop, Zed) to search arXiv, run 3-class Google LangExtract grounding, synthesize production Python code, route/install local models via ModelFusion DynaRot, evolve code with `ShinkaEvolve` + `OpenEvolve`, and verify generated code using a fail-closed Deterministic AST + Local Open-Weight LLM Judge.
 
 ---
 
@@ -23,7 +23,7 @@ The **ArXiv-to-Code MCP Server** (`mcp_server.py` or `python cli.py --mcp`) expo
 
 ---
 
-## 2. Complete 8-Tool Reference Catalog
+## 2. Complete 9-Tool Reference Catalog
 
 ### Tool 1: `arxiv_to_code_status`
 Returns server health, Python/LangExtract/arXiv package versions, active ModelFusion DynaRot hardware tier and model split, ranking factor weights, and novelty blacklist.
@@ -87,3 +87,11 @@ Executes the 4-Arm HMAC-SHA256 signed ArXiv-to-Code StateGraph Swarm (`arm_1_arx
   - `min_score` (`float`, default: `0.0`)
   - `only_novel_enhancements` (`bool`, default: `True`)
   - `evolve_mode` (`str`, default: `"hybrid"`)
+
+### Tool 9: `verify_generated_python_code`
+Verifies generated or evolved Python code against the arXiv paper's grounded spans, mathematical formulations, and security invariants using a fail-closed Deterministic AST + Runtime Test Gate combined with an Open-Weight LLM-as-a-Judge (local Ollama via ModelFusion DynaRot, or optional Gemini API).
+- **Arguments**:
+  - `arxiv_id` (`str`, default: `"2603.02277"`)
+  - `python_source_code` (`str`, default: `""` — auto-synthesizes from `arxiv_id` if omitted)
+  - `verify_model` (`str`, default: `""` — auto-sized by ModelFusion DynaRot if omitted)
+  - `enable_llm` (`bool`, default: `True`)
