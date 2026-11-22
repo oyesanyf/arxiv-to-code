@@ -779,7 +779,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             show_progress=show_ui,
         )
         print(json.dumps(prov, indent=2), flush=True)
-        if not args.arxiv_id and not args.evolve and not args.use_rl and not args.dynarot and not args.extract_doc and not args.audit and not args.verify_llm and not args.verify_panel:
+        has_pipeline_work = bool(
+            args.arxiv_id
+            or args.extract_doc
+            or args.evolve
+            or args.use_rl
+            or args.dynarot
+            or args.audit
+            or args.langgraph
+            or args.generate
+            or args.verify_llm
+            or args.verify_panel
+            or args.langextract_llm
+        )
+        if not has_pipeline_work:
             return 0
     elif should_auto_provision:
         min_needed = (args.panel_size or 2) if args.verify_panel else 1
@@ -809,7 +822,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("[MODELFUSION DYNAROT] HARDWARE SIZING, PARETO FRONT & COMPUTE SPLIT", flush=True)
         print("================================================================================", flush=True)
         print(json.dumps(dynarot_decision.to_dict(), indent=2), flush=True)
-        if not args.arxiv_id and not args.evolve and not args.use_rl and not args.extract_doc and not args.audit and not args.verify_llm and not args.verify_panel:
+        has_downstream_work = bool(
+            args.arxiv_id
+            or args.extract_doc
+            or args.evolve
+            or args.use_rl
+            or args.audit
+            or args.langgraph
+            or args.generate
+            or args.verify_llm
+            or args.verify_panel
+            or args.langextract_llm
+        )
+        if not has_downstream_work:
             return 0
 
     if args.audit:
@@ -817,7 +842,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         with spinner(f"Auditing multi-target defense coverage for arXiv:{target_id}", enabled=show_ui):
             audit_res = audit_defense_coverage_multi_target(target_id)
         print(json.dumps(audit_res, indent=2), flush=True)
-        if not args.evolve and not args.generate:
+        has_post_audit_work = bool(
+            args.evolve
+            or args.use_rl
+            or args.generate
+            or args.langgraph
+            or args.verify_llm
+            or args.verify_panel
+            or args.langextract_llm
+            or args.extract_doc
+        )
+        if not has_post_audit_work:
             return 0 if audit_res.get("success") else 1
 
     only_novel = not args.include_implemented
@@ -836,7 +871,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                 evolve_mode=args.evolve_mode,
             )
         print(json.dumps(final_state, indent=2), flush=True)
-        return 0
+        has_post_swarm_work = bool(
+            args.evolve
+            or args.use_rl
+            or args.generate
+            or args.verify_llm
+            or args.verify_panel
+            or args.langextract_llm
+            or args.extract_doc
+        )
+        if not has_post_swarm_work:
+            return 0
 
     # Gather target paper(s) with animated console spinner
     if args.extract_doc:

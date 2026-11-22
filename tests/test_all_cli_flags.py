@@ -294,3 +294,66 @@ def test_flag_12_verify_llm_and_aliases(tmp_path: Path, capsys) -> None:
     index_text = (out_dir / "INDEX.md").read_text(encoding="utf-8")
     assert "Verification" in index_text
     assert "verification_report.json" in index_text
+
+
+def test_flag_13_all_pipeline_flags_combined_together(tmp_path: Path, capsys) -> None:
+    """Proves every pipeline flag composes cleanly in a single command without premature exit."""
+    out_dir = tmp_path / "all_flags_out"
+    html_out = tmp_path / "combined_report.html"
+    pool_dir = tmp_path / "combined_worlds"
+    rc = cli_main(
+        [
+            "--arxiv-id",
+            "2608.15888",
+            "--dynarot",
+            "--model-family",
+            "glm",
+            "--audit",
+            "--langgraph",
+            "--generate",
+            "--html-report",
+            str(html_out),
+            "--evolves",
+            "--evolve-mode",
+            "hybrid",
+            "--evolve-count",
+            "1",
+            "--generations",
+            "2",
+            "--islands",
+            "2",
+            "--rl",
+            "--rl-cycles",
+            "2",
+            "--rl-budget",
+            "6",
+            "--rl-dream-candidates",
+            "8",
+            "--rl-benchmark",
+            "--rl-seeds",
+            "5",
+            "--rl-trace-pool",
+            str(pool_dir),
+            "--verify-panel",
+            "--panel-size",
+            "2",
+            "--no-auto-provision",
+            "--output-dir",
+            str(out_dir),
+            "--no-progress",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "[MODELFUSION DYNAROT]" in out
+    assert "[SWARM]" in out
+    assert "[EVOLVE]" in out
+    assert "[DREAM-RSI RL]" in out
+    assert "[MODELFUSION PANEL VERIFIER]" in out
+    assert html_out.exists()
+    assert len(list(out_dir.glob("arxiv_2608_15888_*/evolved/champion_arxiv_2608_15888.py"))) == 1
+    assert len(list(out_dir.glob("arxiv_2608_15888_*/rl/rl_champion_arxiv_2608_15888.py"))) == 1
+    assert len(list(out_dir.glob("arxiv_2608_15888_*/verification_report.json"))) == 1
+    assert (pool_dir / "trace_pool.jsonl").exists()
+    assert (out_dir / "INDEX.md").exists()
+
