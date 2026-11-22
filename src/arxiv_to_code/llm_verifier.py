@@ -35,9 +35,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from .dynarot import (
     DynaRotModelRouter,
     build_no_proxy_opener,
-    is_model_installed,
+    detect_live_hardware,
+    find_best_installed_chat_model,
     probe_ollama_models,
     sanitize_model_tag,
+    size_glm_by_hardware,
 )
 from .evolve_engine import EVOLVE_END_MARKER, EVOLVE_START_MARKER, evaluate_python_candidate
 from .langextract_engine import normalize_arxiv_id
@@ -484,14 +486,22 @@ def _invoke_ollama_llm_judge(
     timeout_sec: float = 25.0,
 ) -> Tuple[Optional[Dict[str, Any]], str, str]:
     """
-    Calls local Ollama `/api/generate` with strict JSON output mode (`format="json"`)
-    using a no-proxy opener so localhost requests never stall on Windows proxy resolution.
+    Calls local Ollama `/api/generate` (with automatic `/api/chat` fallback if the model prefers
+    chat completions) in strict JSON output mode (`format="json"`) using a no-proxy opener and
+    WITHOUT `Origin: null` (which Ollama rejects with HTTP 403).
     Returns `(parsed_dict_or_None, status_code, raw_excerpt)`.
     """
-    url = f"{endpoint.rstrip('/')}/api/generate"
-    payload = json.dumps(
+    clean_model = sanitize_model_tag(model_tag)
+    opener = build_no_proxy_opener()
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "ArxivToCode-LLMVerifier/1.0",
+    }
+
+    gen_url = f"{endpoint.rstrip('/')}/api/generate"
+    gen_payload = json.dumps(
         {
-            "model": sanitize_model_tag(model_tag),
+            "model": clean_model,
             "prompt": prompt,
             "stream": False,
             "format": "json",
@@ -502,27 +512,44 @@ def _invoke_ollama_llm_judge(
         }
     ).encode("utf-8")
 
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": "ArxivToCode-LLMVerifier/1.0",
-            "Origin": "null",
-        },
-    )
-    opener = build_no_proxy_opener()
     try:
+        req = urllib.request.Request(gen_url, data=gen_payload, method="POST", headers=headers)
         with opener.open(req, timeout=timeout_sec) as resp:
-            if resp.status != 200:
-                return None, f"ollama_http_{resp.status}_fallback", ""
-            body = json.loads(resp.read().decode("utf-8", errors="replace"))
-            raw_text = str(body.get("response", "")).strip()
-            parsed = parse_llm_verification_json(raw_text)
-            if parsed is None:
-                return None, "llm_parse_fallback", raw_text[:400]
-            return parsed, "llm_verified", raw_text[:400]
+            if resp.status == 200:
+                body = json.loads(resp.read().decode("utf-8", errors="replace"))
+                raw_text = str(body.get("response", "")).strip()
+                parsed = parse_llm_verification_json(raw_text)
+                if parsed is None:
+                    return None, "llm_parse_fallback", raw_text[:400]
+                return parsed, "llm_verified", raw_text[:400]
+            return None, f"ollama_http_{resp.status}_fallback", ""
+    except urllib.error.HTTPError as exc:
+        if exc.code == 400:
+            # Try /api/chat fallback for chat-only Ollama templates
+            chat_url = f"{endpoint.rstrip('/')}/api/chat"
+            chat_payload = json.dumps(
+                {
+                    "model": clean_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                    "format": "json",
+                    "options": {"temperature": 0.1, "num_predict": 650},
+                }
+            ).encode("utf-8")
+            try:
+                chat_req = urllib.request.Request(chat_url, data=chat_payload, method="POST", headers=headers)
+                with opener.open(chat_req, timeout=timeout_sec) as resp:
+                    if resp.status == 200:
+                        body = json.loads(resp.read().decode("utf-8", errors="replace"))
+                        msg_obj = body.get("message") or {}
+                        raw_text = str(msg_obj.get("content", "")).strip()
+                        parsed = parse_llm_verification_json(raw_text)
+                        if parsed is None:
+                            return None, "llm_parse_fallback", raw_text[:400]
+                        return parsed, "llm_verified", raw_text[:400]
+            except Exception:
+                pass
+        return None, f"ollama_http_{exc.code}_fallback", ""
     except TimeoutError:
         return None, "llm_timeout_fallback", ""
     except urllib.error.URLError as exc:
@@ -662,27 +689,36 @@ def verify_generated_python_code(
                 )
         else:
             ollama_online, installed_models = probe_ollama_models(endpoint=endpoint, timeout_sec=0.4)
+            hw = detect_live_hardware()
+            recommended_glm = size_glm_by_hardware(hw.free_ram_gb, hw.free_vram_mb)
             preferred_candidates = list(
                 dict.fromkeys(
                     [
-                        *( [sanitize_model_tag(requested_model)] if requested_model else [] ),
+                        *([sanitize_model_tag(requested_model)] if requested_model else []),
+                        recommended_glm,
                         dynarot_decision.shinka_heavy_reasoning_model,
                         dynarot_decision.primary_model,
                         dynarot_decision.openevolve_fast_mutation_model,
                     ]
                 )
             )
-            chosen_installed = next(
-                (m for m in preferred_candidates if is_model_installed(m, installed_models)),
-                installed_models[0] if installed_models else None,
-            )
+            # QuorumRAG-calibrated model selection: strictly excludes embedding/vision/decision-only
+            # (e.g. Bespoke-Nimble-9B) and memory-ineligible models from freeform JSON verification.
+            chosen_installed: Optional[str] = None
+            for pref_cand in preferred_candidates:
+                hit = find_best_installed_chat_model(pref_cand, hw, installed_models)
+                if hit is not None:
+                    chosen_installed = hit
+                    break
 
+            recommended_pull = preferred_candidates[0]
             guidance = {
                 "ollama_endpoint": endpoint,
                 "ollama_online": ollama_online,
                 "installed_models": installed_models,
-                "recommended_model": preferred_candidates[0],
-                "pull_command": f"ollama pull {preferred_candidates[0]}",
+                "recommended_model": recommended_pull,
+                "recommended_glm_model": recommended_glm,
+                "pull_command": f"ollama pull {recommended_pull}",
             }
             llm_audit["ollama_guidance"] = guidance
 
@@ -690,13 +726,14 @@ def verify_generated_python_code(
                 llm_audit["status"] = "ollama_offline_fallback"
                 llm_audit["summary"] = (
                     f"Local Ollama ({endpoint}) is offline; verified via deterministic AST & runtime test gate. "
-                    f"Start Ollama (`ollama serve`) and pull `{preferred_candidates[0]}` for live LLM auditing."
+                    f"Start Ollama (`ollama serve`) and pull `{recommended_pull}` for live LLM auditing."
                 )
             elif chosen_installed is None:
                 llm_audit["status"] = "model_not_installed_fallback"
                 llm_audit["summary"] = (
-                    f"Ollama is online but no open-weight models are pulled yet. "
-                    f"Run `ollama pull {preferred_candidates[0]}` to enable live LLM code verification."
+                    f"Ollama is online (installed: {installed_models}) but no chat/completion model fitting "
+                    f"available free memory ({hw.free_ram_gb} GB RAM / {hw.free_vram_mb} MB VRAM) is pulled yet. "
+                    f"Run `ollama pull {recommended_pull}` (or `ollama pull glm4:9b`) to enable live LLM verification."
                 )
             else:
                 resolved_model = sanitize_model_tag(chosen_installed)

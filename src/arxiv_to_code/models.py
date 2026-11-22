@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 @dataclass
 class SystemHardwareResources:
-    """Live runtime hardware telemetry strictly following the Dynamic Available Memory Law."""
+    """Live runtime hardware telemetry strictly following the Dynamic Available Memory Law (QuorumRAG + DynaRot parity)."""
 
     total_ram_gb: float
     free_ram_gb: float
@@ -24,6 +24,8 @@ class SystemHardwareResources:
     gpu_name: Optional[str]
     gpu_vram_total_gb: float
     gpu_vram_free_gb: float
+    free_disk_gb: float = 100.0
+    gpu_count: int = 0
 
     @property
     def free_vram_mb(self) -> float:
@@ -84,6 +86,11 @@ class DynaRotRoutingDecision:
     routed_by: str
     routing_duration_ms: float
     hardware: Dict[str, Any]
+    recommended_glm_model: str = "glm4:9b"
+    recommended_gemma_model: str = "gemma2:2b"
+    calibrated_installed_model: Optional[str] = None
+    selection_rationale: str = ""
+    provision_plan: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

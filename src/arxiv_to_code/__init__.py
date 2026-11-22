@@ -10,9 +10,20 @@ __version__ = "1.0.0"
 
 from .dynarot import (
     DynaRotModelRouter,
+    calculate_provision_plan,
     detect_live_hardware,
+    estimated_model_disk_gb,
+    find_best_installed_chat_model,
+    is_decision_only_model,
+    is_synthesis_chat_model,
+    model_capability_score,
+    model_fits_free_memory,
+    probe_free_disk_gb,
     probe_ollama_models,
     sanitize_model_tag,
+    select_model_calibrated,
+    size_gemma_by_hardware,
+    size_glm_by_hardware,
     size_models_by_available_memory,
 )
 from .evolve_engine import (

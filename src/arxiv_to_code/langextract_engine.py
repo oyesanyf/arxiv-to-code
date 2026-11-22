@@ -67,8 +67,16 @@ class AnnotatedDocument:
     document_id: str = ""
 
 
+def _detect_real_langextract_version() -> str:
+    try:
+        import importlib.metadata
+        return importlib.metadata.version("langextract")
+    except Exception:
+        return "1.7.1"
+
+
 class _LxCompatibleEngine:
-    __version__ = "1.7.1"
+    __version__ = _detect_real_langextract_version()
 
     @staticmethod
     def visualize(doc: AnnotatedDocument) -> str:
@@ -88,7 +96,7 @@ class _LxCompatibleEngine:
                         start_pos=e.char_interval.start_pos,
                         end_pos=e.char_interval.end_pos,
                     ),
-                    description=e.description,
+                    attributes={"description": e.description},
                 )
                 for e in doc.extractions
             ]
@@ -895,7 +903,12 @@ def extract_with_google_langextract_llm(
     if is_gemini:
         model_url = None
     else:
-        from .dynarot import DynaRotModelRouter, is_model_installed, probe_ollama_models
+        from .dynarot import (
+            detect_live_hardware,
+            find_best_installed_chat_model,
+            probe_ollama_models,
+            size_glm_by_hardware,
+        )
 
         online, installed = probe_ollama_models(endpoint=ollama_endpoint)
         if not online:
@@ -906,21 +919,19 @@ def extract_with_google_langextract_llm(
             else:
                 return [], None, "ollama_offline_fallback_to_deterministic_grounding"
         else:
-            if not resolved_model:
-                decision = DynaRotModelRouter(endpoint=ollama_endpoint).route(prompt=text[:250])
-                # Prefer fast open-weight Ollama model (e.g. gemma2:2b / qwen2.5:7b / DynaRot fast) for snappy extraction
-                preferred_open = [
-                    decision.openevolve_fast_mutation_model,
-                    decision.primary_model,
-                    "gemma2:2b",
-                    "qwen2.5:7b",
-                ]
-                resolved_model = next(
-                    (m for m in preferred_open if is_model_installed(m, installed)),
-                    installed[0] if installed else decision.openevolve_fast_mutation_model,
+            hw = detect_live_hardware()
+            # QuorumRAG-calibrated selection: prefer requested model or resource-sized GLM (`glm-4.7-flash` / `glm4:9b`)
+            # while strictly filtering out embedding/vision/decision-only models (e.g. Bespoke-Nimble-9B)
+            ideal_glm = size_glm_by_hardware(hw.free_ram_gb, hw.free_vram_mb)
+            preferred = resolved_model or ideal_glm
+            chosen = find_best_installed_chat_model(preferred, hw, installed)
+            if chosen is None:
+                return (
+                    [],
+                    None,
+                    f"no_chat_completion_model_installed_in_ollama:run_ollama_pull_{ideal_glm}",
                 )
-            elif installed and not is_model_installed(resolved_model, installed):
-                resolved_model = installed[0]
+            resolved_model = chosen
             model_url = ollama_endpoint
 
     examples = [
@@ -949,15 +960,30 @@ def extract_with_google_langextract_llm(
             "text_or_documents": text,
             "prompt_description": prompt_desc,
             "examples": examples,
-            "model_id": resolved_model,
             "show_progress": False,
         }
         if is_gemini:
+            kwargs["model_id"] = resolved_model
             kwargs["api_key"] = api_key
         else:
-            # Official Google LangExtract Ollama config:
-            # Leave fence_output & use_schema_constraints unset so FormatModeSchema auto-configures JSON mode
-            kwargs["model_url"] = model_url
+            # Direct OllamaLanguageModel instantiation guarantees EVERY Ollama model works with
+            # Google LangExtract — including `glm-4.7-flash`, `glm4:9b`, `qwen2.5:*`, `gemma4:26b`,
+            # and custom GGUF tags not yet listed in langextract's static OLLAMA_PATTERNS regex.
+            try:
+                from langextract.providers.ollama import OllamaLanguageModel  # type: ignore
+                from langextract.core.data import FormatType  # type: ignore
+
+                kwargs["model"] = OllamaLanguageModel(
+                    model_id=resolved_model,
+                    model_url=model_url or ollama_endpoint,
+                    format_type=FormatType.JSON,
+                    timeout=45,
+                )
+                kwargs["fence_output"] = False
+                kwargs["use_schema_constraints"] = False
+            except ImportError:
+                kwargs["model_id"] = resolved_model
+                kwargs["model_url"] = model_url
 
         result_doc = real_lx.extract(**kwargs)
         if isinstance(result_doc, list):

@@ -24,8 +24,9 @@ The **ArXiv-to-Code All-in-One CLI** (`python arixv_to_code.py`) provides single
 | `--audit`, `--audit-defense` | `flag` | `False` | Run multi-target defense & invariant coverage audit across Python runtime, OshoosiClaw, KillSwitch, and AgentOctopus. |
 | `--verify-llm`, `--llm-verify`, `--verify`, `--verify-code` | `flag` | `False` | Verify generated (and evolved) Python code via Layer 1 Deterministic AST/Security/Unit-Test Gate + Layer 2 Local Open-Weight LLM-as-a-Judge (Ollama via DynaRot) and save `verification_report.json`. |
 | `--verify-model` | `str` | `None` | Optional model tag for `--verify-llm` (e.g., `qwen2.5:7b`, `gemma2:2b`, `deepseek-r1:7b`, or `gemini-2.5-flash`). |
-| `--dynarot`, `--sys-info` | `flag` | `False` | Probe live free RAM & free VRAM, compute 4-objective Pareto front & knee-point, and print the ShinkaEvolve/OpenEvolve compute split. |
-| `--install-models` | `flag` | `False` | Automatically provision/pull (`ollama pull <model>`) the DynaRot hardware-sized models for current available memory. |
+| `--dynarot`, `--sys-info` | `flag` | `False` | Probe live free RAM, free GPU VRAM, and free disk headroom, compute 4-objective Pareto front & QuorumRAG-calibrated GLM/Qwen/Gemma provision plan. |
+| `--model-family` | `str` | `"auto"` | Preferred open-weight Ollama model family calibrated to available RAM/VRAM/disk (`auto`, `glm` [`glm-4.7-flash`/`glm4:9b`], `qwen`, `gemma`). |
+| `--install-models` | `flag` | `False` | Automatically provision/pull (`ollama pull <model>`) resource-safe models (downsizing automatically if RAM/VRAM/disk is tight). |
 | `--evolves`, `--evolve`, `--evoves` *(also `---evolves`)* | `flag` | `False` | Activate the combined **ShinkaEvolve + OpenEvolve** evolutionary optimization pipeline on the synthesized Python code. |
 | `--evolve-mode` | `str` | `"hybrid"` | Pairing mode for `ShinkaEvolve` + `OpenEvolve`: `sequential`, `parallel`, or `hybrid`. |
 | `--evolve-count` | `int` | `1` | Number of full evolutionary cycles/rounds to execute `OpenEvolve` + `ShinkaEvolve` (carrying forward champions & MAP-Elites grid across every round). |

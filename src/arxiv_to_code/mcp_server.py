@@ -139,21 +139,25 @@ async def arxiv_to_code_status() -> str:
 @server.tool()
 async def dynarot_hardware_route_and_install(
     prompt: str = "Synthesize production Python code from arXiv paper and evolve with ShinkaEvolve + OpenEvolve",
+    model_family: str = "auto",
     auto_install_models: bool = False,
     override_free_ram_gb: Optional[float] = None,
     override_free_vram_mb: Optional[float] = None,
+    override_free_disk_gb: Optional[float] = None,
 ) -> str:
     """
-    Executes ModelFusion DynaRot hardware-aware routing strictly under the Dynamic Available
-    Memory Law (free RAM & free VRAM, never total RAM), splits the compute budget between
-    heavy reasoning models (for ShinkaEvolve) and fast lightweight models (for OpenEvolve),
-    and optionally installs/pulls missing Ollama models based on runtime resources.
+    Executes ModelFusion DynaRot + QuorumRAG AutoFusion hardware-aware routing strictly under
+    the Dynamic Available Memory Law (free RAM, free VRAM, and free disk headroom — never total RAM),
+    supports GLM (`glm-4.7-flash`, `glm4:9b`), Qwen 2.5, and Gemma families, splits compute budget
+    between ShinkaEvolve and OpenEvolve, and optionally pulls missing Ollama models.
     """
     router = DynaRotModelRouter()
     if auto_install_models:
         res = router.provision_models_for_resources(
             override_free_ram_gb=override_free_ram_gb,
             override_free_vram_mb=override_free_vram_mb,
+            override_free_disk_gb=override_free_disk_gb,
+            model_family=model_family,
             auto_pull=True,
         )
         return json.dumps(res, indent=2)
@@ -162,6 +166,8 @@ async def dynarot_hardware_route_and_install(
         prompt=prompt,
         override_free_ram_gb=override_free_ram_gb,
         override_free_vram_mb=override_free_vram_mb,
+        override_free_disk_gb=override_free_disk_gb,
+        model_family=model_family,
     )
     return json.dumps(decision.to_dict(), indent=2)
 

@@ -83,3 +83,32 @@ def test_audit_defense_coverage_multi_target() -> None:
     assert res["success"] is True
     assert res["overall_coverage_percentage"] == 100.0
     assert len(res["codebase_enhancement_recommendations"]) >= 1
+
+
+def test_real_google_langextract_artifacts_and_ollama_glm_provider(tmp_path: Path) -> None:
+    from arxiv_to_code.langextract_engine import save_langextract_artifacts
+
+    paper = fetch_paper_by_id("2603.02277")
+    assert paper is not None
+    _, annotated_doc = extract_grounded_breakouts(paper)
+
+    saved = save_langextract_artifacts(annotated_doc, tmp_path)
+    jsonl_path = Path(saved["jsonl_path"])
+    html_path = Path(saved["html_path"])
+    assert jsonl_path.exists() and jsonl_path.stat().st_size > 100
+    assert html_path.exists() and html_path.stat().st_size > 1000
+    # Verify real Google LangExtract interactive visualization was rendered (not minimal fallback)
+    html_text = html_path.read_text(encoding="utf-8")
+    assert "<script" in html_text.lower() or "highlight" in html_text.lower()
+
+    # Verify direct OllamaLanguageModel accepts GLM tags (bypassing static OLLAMA_PATTERNS limitation)
+    from langextract.providers.ollama import OllamaLanguageModel
+    from langextract.core.data import FormatType
+
+    glm_model = OllamaLanguageModel(
+        model_id="glm-4.7-flash",
+        model_url="http://127.0.0.1:11434",
+        format_type=FormatType.JSON,
+        timeout=30,
+    )
+    assert glm_model is not None

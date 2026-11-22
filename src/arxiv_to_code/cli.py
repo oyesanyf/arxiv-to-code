@@ -456,7 +456,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     g_dynarot.add_argument(
         "--install-models",
         action="store_true",
-        help="Automatically install/pull optimal local Ollama models (ollama pull <model>) based on live available RAM and VRAM",
+        help="Automatically install/pull optimal local Ollama models (ollama pull <model>) based on live available RAM, VRAM, and disk headroom",
+    )
+    g_dynarot.add_argument(
+        "--model-family",
+        type=str,
+        choices=["auto", "glm", "qwen", "gemma"],
+        default="auto",
+        help="Preferred open-weight Ollama model family calibrated to available RAM/VRAM/disk (QuorumRAG AutoFusion parity: auto | glm | qwen | gemma; default: auto)",
     )
 
     g_evolve = parser.add_argument_group("5. Combined ShinkaEvolve + OpenEvolve Evolutionary Search")
@@ -590,14 +597,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("================================================================================", flush=True)
         print("[MODELFUSION DYNAROT] RESOURCE-BASED MODEL PROVISIONING & AUTO-INSTALL", flush=True)
         print("================================================================================", flush=True)
-        with spinner("Probing runtime free RAM/VRAM and provisioning Ollama models", enabled=show_ui):
-            prov = router.provision_models_for_resources(auto_pull=True)
+        with spinner("Probing runtime free RAM/VRAM/disk and provisioning Ollama models", enabled=show_ui):
+            prov = router.provision_models_for_resources(
+                model_family=args.model_family,
+                auto_pull=True,
+            )
         print(json.dumps(prov, indent=2), flush=True)
         if not args.arxiv_id and not args.evolve and not args.dynarot and not args.extract_doc and not args.audit and not args.verify_llm:
             return 0
 
-    with spinner("ModelFusion DynaRot: probing live free RAM, GPU VRAM & Pareto knee-point", enabled=show_ui):
-        dynarot_decision = router.route(prompt=args.query)
+    with spinner("ModelFusion DynaRot: probing live free RAM, GPU VRAM, disk & Pareto knee-point", enabled=show_ui):
+        dynarot_decision = router.route(prompt=args.query, model_family=args.model_family)
 
     if args.dynarot:
         print("================================================================================", flush=True)

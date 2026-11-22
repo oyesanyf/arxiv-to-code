@@ -43,6 +43,8 @@ HIGH_SIGNAL_RESEARCH_ORGS = (
     "recursivesi",
     "qwen",
     "deepseek-ai",
+    "zai-org",
+    "zhipu",
     "google",
     "meta-llama",
     "mistralai",
@@ -51,7 +53,13 @@ HIGH_SIGNAL_RESEARCH_ORGS = (
     "nvidia",
 )
 
+GEMMA4_26B_MIN_FREE_RAM_GB = 18.0
+GEMMA4_26B_MIN_FREE_VRAM_MB = 16_384.0
+NIMBLE_MIN_FREE_RAM_GB = 12.0
+NIMBLE_MIN_FREE_VRAM_MB = 6_000.0
+
 # Curated open-weight catalog with parameter counts, capability scores, and popularity metrics
+# Includes Z.ai GLM (`glm-4.7-flash`, `glm4:9b`), Qwen 2.5, DeepSeek-R1, and Gemma families
 CURATED_MODEL_CATALOG: List[Dict[str, Any]] = [
     {
         "model_id": "qwen2.5:32b",
@@ -73,6 +81,28 @@ CURATED_MODEL_CATALOG: List[Dict[str, Any]] = [
         "downloads": 5_200_000,
         "trending_score": 960.0,
         "author": "deepseek-ai",
+        "role": "heavy_reasoning",
+    },
+    {
+        "model_id": "glm-4.7-flash",
+        "params_b": 30.0,
+        "capability_score": 9.5,
+        "decision_score": 9.4,
+        "efficiency_score": 9.1,
+        "downloads": 4_500_000,
+        "trending_score": 955.0,
+        "author": "zai-org",
+        "role": "heavy_reasoning",
+    },
+    {
+        "model_id": "gemma4:26b",
+        "params_b": 26.0,
+        "capability_score": 9.4,
+        "decision_score": 9.3,
+        "efficiency_score": 8.6,
+        "downloads": 4_200_000,
+        "trending_score": 945.0,
+        "author": "google",
         "role": "heavy_reasoning",
     },
     {
@@ -98,6 +128,28 @@ CURATED_MODEL_CATALOG: List[Dict[str, Any]] = [
         "role": "heavy_reasoning",
     },
     {
+        "model_id": "glm4:9b",
+        "params_b": 9.4,
+        "capability_score": 8.9,
+        "decision_score": 8.8,
+        "efficiency_score": 9.1,
+        "downloads": 7_800_000,
+        "trending_score": 915.0,
+        "author": "zai-org",
+        "role": "balanced",
+    },
+    {
+        "model_id": "gemma2:9b",
+        "params_b": 9.0,
+        "capability_score": 8.7,
+        "decision_score": 8.5,
+        "efficiency_score": 8.9,
+        "downloads": 8_100_000,
+        "trending_score": 880.0,
+        "author": "google",
+        "role": "balanced",
+    },
+    {
         "model_id": "qwen2.5:7b",
         "params_b": 7.0,
         "capability_score": 8.6,
@@ -120,6 +172,17 @@ CURATED_MODEL_CATALOG: List[Dict[str, Any]] = [
         "role": "heavy_reasoning",
     },
     {
+        "model_id": "gemma3:4b",
+        "params_b": 4.0,
+        "capability_score": 8.1,
+        "decision_score": 8.0,
+        "efficiency_score": 9.4,
+        "downloads": 6_900_000,
+        "trending_score": 895.0,
+        "author": "google",
+        "role": "fast_mutation",
+    },
+    {
         "model_id": "qwen2.5:3b",
         "params_b": 3.0,
         "capability_score": 7.9,
@@ -128,6 +191,17 @@ CURATED_MODEL_CATALOG: List[Dict[str, Any]] = [
         "downloads": 7_200_000,
         "trending_score": 870.0,
         "author": "Qwen",
+        "role": "fast_mutation",
+    },
+    {
+        "model_id": "gemma2:2b",
+        "params_b": 2.0,
+        "capability_score": 7.6,
+        "decision_score": 7.5,
+        "efficiency_score": 9.65,
+        "downloads": 8_600_000,
+        "trending_score": 875.0,
+        "author": "google",
         "role": "fast_mutation",
     },
     {
@@ -222,15 +296,77 @@ def build_no_proxy_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def _detect_gpu_vram() -> Tuple[Optional[str], float, float]:
+def probe_free_disk_gb() -> float:
     """
-    Detects GPU name, total VRAM (GB), and free VRAM (GB) via nvidia-smi with a hard
+    Measures available free disk space (GB) on the filesystem hosting Ollama models
+    (`OLLAMA_MODELS`, `USERPROFILE`, or `HOME`), matching QuorumRAG's `HardwareTelemetry::probe_free_disk_gb`.
+    """
+    target = (
+        os.environ.get("OLLAMA_MODELS")
+        or os.environ.get("USERPROFILE")
+        or os.environ.get("HOME")
+        or os.getcwd()
+    )
+    try:
+        usage = shutil.disk_usage(target)
+        return round(max(0.0, usage.free / (1024.0 ** 3)), 2)
+    except Exception:
+        return 100.0
+
+
+def parse_nvidia_smi_output(stdout: str) -> Tuple[Optional[str], float, float, int]:
+    """
+    Parses multi-line `nvidia-smi` CSV output (3-column or 2-column) summing VRAM across
+    multi-GPU setups and formatting compound GPU names, matching QuorumRAG's `HardwareTelemetry`.
+    Returns `(gpu_name, total_vram_gb, free_vram_gb, gpu_count)`.
+    """
+    names: List[str] = []
+    total_mb = 0.0
+    free_mb = 0.0
+    for raw_line in (stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 3 and parts[0]:
+            try:
+                names.append(parts[0])
+                total_mb += float(parts[1].split()[0])
+                free_mb += float(parts[2].split()[0])
+            except ValueError:
+                continue
+        elif len(parts) == 2 and parts[0]:
+            try:
+                names.append(parts[0])
+                free_mb += float(parts[1].split()[0])
+            except ValueError:
+                continue
+    if not names:
+        return None, 0.0, 0.0, 0
+    if len(names) == 1:
+        formatted = names[0]
+    elif all(n == names[0] for n in names):
+        formatted = f"{len(names)}x {names[0]}"
+    else:
+        formatted = " + ".join(names)
+    return formatted, round(total_mb / 1024.0, 2), round(free_mb / 1024.0, 2), len(names)
+
+
+def _detect_gpu_vram() -> Tuple[Optional[str], float, float, int]:
+    """
+    Detects GPU name, total VRAM (GB), free VRAM (GB), and GPU count via nvidia-smi with a hard
     1.0s non-blocking daemon timeout so Windows pipe handle stalls can never hang startup.
     """
-    if not shutil.which("nvidia-smi"):
-        return None, 0.0, 0.0
+    candidates = [
+        "nvidia-smi",
+        r"C:\Windows\System32\nvidia-smi.exe",
+        r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
+    ]
+    binary = next((b for b in candidates if (os.path.exists(b) if "\\" in b else shutil.which(b))), None)
+    if not binary:
+        return None, 0.0, 0.0, 0
 
-    result_box: List[Tuple[Optional[str], float, float]] = []
+    result_box: List[Tuple[Optional[str], float, float, int]] = []
     proc_holder: List[Any] = []
 
     def _worker() -> None:
@@ -238,7 +374,7 @@ def _detect_gpu_vram() -> Tuple[Optional[str], float, float]:
             creationflags = 0x08000000 if platform.system() == "Windows" else 0
             proc = subprocess.Popen(
                 [
-                    "nvidia-smi",
+                    binary,
                     "--query-gpu=name,memory.total,memory.free",
                     "--format=csv,noheader,nounits",
                 ],
@@ -253,13 +389,9 @@ def _detect_gpu_vram() -> Tuple[Optional[str], float, float]:
             proc_holder.append(proc)
             stdout, _ = proc.communicate(timeout=0.9)
             if proc.returncode == 0 and stdout and stdout.strip():
-                first_line = stdout.strip().splitlines()[0]
-                parts = [p.strip() for p in first_line.split(",")]
-                if len(parts) >= 3:
-                    name = parts[0]
-                    total_gb = round(float(parts[1]) / 1024.0, 2)
-                    free_gb = round(float(parts[2]) / 1024.0, 2)
-                    result_box.append((name, total_gb, free_gb))
+                parsed = parse_nvidia_smi_output(stdout)
+                if parsed[3] > 0:
+                    result_box.append(parsed)
         except Exception:
             if proc_holder:
                 try:
@@ -275,7 +407,7 @@ def _detect_gpu_vram() -> Tuple[Optional[str], float, float]:
             proc_holder[0].kill()
         except Exception:
             pass
-    return result_box[0] if result_box else (None, 0.0, 0.0)
+    return result_box[0] if result_box else (None, 0.0, 0.0, 0)
 
 
 _HARDWARE_CACHE: Optional[Tuple[float, SystemHardwareResources]] = None
@@ -285,17 +417,18 @@ _OLLAMA_PROBE_CACHE: Dict[str, Tuple[float, bool, List[str]]] = {}
 def detect_live_hardware(
     override_free_ram_gb: Optional[float] = None,
     override_free_vram_mb: Optional[float] = None,
+    override_free_disk_gb: Optional[float] = None,
 ) -> SystemHardwareResources:
     """
-    Probes live available system RAM and GPU VRAM at runtime.
-    Caches hardware detection for 30 seconds within the process (matching ModelFusion's
-    OnceLock SYSTEM_MEMORY_CACHE) so repeated routing calls never block on subprocess spawns.
+    Probes live available system RAM, GPU VRAM, and free disk headroom at runtime.
+    Caches hardware detection for 30 seconds within the process (matching ModelFusion & QuorumRAG).
     """
     global _HARDWARE_CACHE
     now = time.monotonic()
     if (
         override_free_ram_gb is None
         and override_free_vram_mb is None
+        and override_free_disk_gb is None
         and _HARDWARE_CACHE is not None
         and (now - _HARDWARE_CACHE[0]) < 30.0
     ):
@@ -304,16 +437,19 @@ def detect_live_hardware(
     if _HARDWARE_CACHE is not None and (now - _HARDWARE_CACHE[0]) < 30.0:
         base_hw = _HARDWARE_CACHE[1]
         total_ram_gb, free_ram_gb = base_hw.total_ram_gb, base_hw.free_ram_gb
-        gpu_name, gpu_vram_total_gb, gpu_vram_free_gb = (
+        gpu_name, gpu_vram_total_gb, gpu_vram_free_gb, gpu_count = (
             base_hw.gpu_name,
             base_hw.gpu_vram_total_gb,
             base_hw.gpu_vram_free_gb,
+            base_hw.gpu_count,
         )
         cpu_cores = base_hw.cpu_cores
+        free_disk_gb = base_hw.free_disk_gb
     else:
         total_ram_gb, free_ram_gb = _detect_windows_ram_gb()
-        gpu_name, gpu_vram_total_gb, gpu_vram_free_gb = _detect_gpu_vram()
+        gpu_name, gpu_vram_total_gb, gpu_vram_free_gb, gpu_count = _detect_gpu_vram()
         cpu_cores = os.cpu_count() or 4
+        free_disk_gb = probe_free_disk_gb()
         _HARDWARE_CACHE = (
             now,
             SystemHardwareResources(
@@ -323,6 +459,8 @@ def detect_live_hardware(
                 gpu_name=gpu_name,
                 gpu_vram_total_gb=gpu_vram_total_gb,
                 gpu_vram_free_gb=gpu_vram_free_gb,
+                free_disk_gb=free_disk_gb,
+                gpu_count=gpu_count,
             ),
         )
 
@@ -334,6 +472,9 @@ def detect_live_hardware(
         gpu_vram_total_gb = max(gpu_vram_total_gb, gpu_vram_free_gb)
         if gpu_vram_free_gb > 0 and gpu_name is None:
             gpu_name = "Simulated/Override GPU"
+            gpu_count = max(1, gpu_count)
+    if override_free_disk_gb is not None:
+        free_disk_gb = float(override_free_disk_gb)
 
     return SystemHardwareResources(
         total_ram_gb=total_ram_gb,
@@ -342,6 +483,8 @@ def detect_live_hardware(
         gpu_name=gpu_name,
         gpu_vram_total_gb=gpu_vram_total_gb,
         gpu_vram_free_gb=gpu_vram_free_gb,
+        free_disk_gb=free_disk_gb,
+        gpu_count=gpu_count,
     )
 
 
@@ -390,12 +533,12 @@ def size_models_by_available_memory(
         max_ensemble = 7
         pool = [
             "qwen2.5:32b",
+            "glm-4.7-flash",
             "deepseek-r1:32b",
+            "gemma4:26b",
             "qwen2.5:14b",
-            "deepseek-r1:14b",
+            "glm4:9b",
             "qwen2.5:7b",
-            "deepseek-r1:7b",
-            "qwen2.5:3b",
         ]
     elif free_ram_gb >= 24.0 or free_vram_mb >= 14_000.0:
         tier = "Tier 2: High-Throughput 14B (Free RAM >= 24 GB or Free VRAM >= 14 GB)"
@@ -405,22 +548,22 @@ def size_models_by_available_memory(
         max_ensemble = 5
         pool = [
             "qwen2.5:14b",
+            "glm-4.7-flash",
             "deepseek-r1:14b",
+            "glm4:9b",
             "qwen2.5:7b",
-            "deepseek-r1:7b",
-            "qwen2.5:3b",
         ]
     elif free_ram_gb >= 12.0 or free_vram_mb >= 4_500.0:
-        tier = "Tier 3: GPU-Resident 7B (Free RAM >= 12 GB or Free VRAM >= 4.5 GB)"
+        tier = "Tier 3: GPU-Resident 7B/9B (Free RAM >= 12 GB or Free VRAM >= 4.5 GB)"
         primary = "qwen2.5:7b"
         shinka_heavy = "qwen2.5:7b"
         openevolve_fast = "qwen2.5:1.5b"
         max_ensemble = 4
         pool = [
             "qwen2.5:7b",
+            "glm4:9b",
             "deepseek-r1:7b",
             "qwen2.5:3b",
-            "deepseek-r1:1.5b",
             "qwen2.5:1.5b",
         ]
     elif free_ram_gb >= 6.0 or free_vram_mb >= 2_000.0:
@@ -431,6 +574,7 @@ def size_models_by_available_memory(
         max_ensemble = 3
         pool = [
             "qwen2.5:3b",
+            "gemma3:4b",
             "deepseek-r1:1.5b",
             "qwen2.5:1.5b",
         ]
@@ -442,6 +586,7 @@ def size_models_by_available_memory(
         max_ensemble = 2
         pool = [
             "qwen2.5:1.5b",
+            "gemma2:2b",
             "qwen2.5:0.5b",
         ]
 
@@ -452,6 +597,296 @@ def size_models_by_available_memory(
     pool = [sanitize_model_tag(m) for m in pool]
 
     return tier, primary, shinka_heavy, openevolve_fast, max_ensemble, pool
+
+
+# =============================================================================
+# QuorumRAG AutoFusionRouter Parity: Resource-Calibrated GLM / Qwen / Gemma Selection
+# =============================================================================
+
+def can_run_gemma4_26b(free_ram_gb: float, free_vram_mb: float) -> bool:
+    """Evaluates strictly runtime free memory (never total RAM) for 26B / GLM-4.7-Flash tier."""
+    return free_ram_gb >= GEMMA4_26B_MIN_FREE_RAM_GB or free_vram_mb >= GEMMA4_26B_MIN_FREE_VRAM_MB
+
+
+def size_glm_by_hardware(free_ram_gb: float, free_vram_mb: float) -> str:
+    """
+    Sizes the Z.ai GLM family strictly against live runtime available RAM & VRAM:
+      - Free RAM >= 18 GB OR Free VRAM >= 16,384 MB -> glm-4.7-flash (30B MoE / 3B active, tools+thinking)
+      - Free RAM >= 12 GB OR Free VRAM >= 4,500 MB  -> glm4:9b (9.4B, 128K context)
+      - Free RAM >= 6 GB  OR Free VRAM >= 2,000 MB  -> qwen2.5:3b (memory-safe edge fallback)
+      - Below 6 GB                                  -> qwen2.5:1.5b
+    """
+    if can_run_gemma4_26b(free_ram_gb, free_vram_mb):
+        return "glm-4.7-flash"
+    if free_ram_gb >= 12.0 or free_vram_mb >= 4_500.0:
+        return "glm4:9b"
+    if free_ram_gb >= 6.0 or free_vram_mb >= 2_000.0:
+        return "qwen2.5:3b"
+    return "qwen2.5:1.5b"
+
+
+def size_gemma_by_hardware(free_ram_gb: float, free_vram_mb: float) -> str:
+    """Matches QuorumRAG AutoFusionRouter::size_gemma_by_hardware strictly on runtime free memory."""
+    if can_run_gemma4_26b(free_ram_gb, free_vram_mb):
+        return "gemma4:26b"
+    if free_ram_gb >= 12.0 or free_vram_mb >= 6_000.0:
+        return "gemma2:9b"
+    if free_ram_gb >= 6.0 or free_vram_mb >= 3_000.0:
+        return "gemma3:4b"
+    return "gemma2:2b"
+
+
+def is_embedding_model(tag: str) -> bool:
+    low = tag.strip().lower()
+    return (
+        "embed" in low
+        or low.startswith("bge-")
+        or "nomic-embed" in low
+        or "minilm" in low
+    )
+
+
+def is_vision_model(tag: str) -> bool:
+    low = tag.strip().lower()
+    return (
+        low.startswith("moondream")
+        or low.startswith("llava")
+        or low.startswith("minicpm-v")
+        or low.startswith("qwen2.5-vl")
+        or low.startswith("glm-ocr")
+        or "-vl" in low
+    )
+
+
+def is_decision_only_model(tag: str) -> bool:
+    """Identifies decision/logprob-only GGUF models (e.g. Bespoke-Nimble-9B) that do not support /api/generate."""
+    low = tag.strip().lower()
+    return "bespoke-nimble" in low or low.startswith("nimble")
+
+
+def is_synthesis_chat_model(tag: str) -> bool:
+    """True when an Ollama model tag supports general text/JSON generation (not embedding/vision/decision-only)."""
+    return (
+        not is_embedding_model(tag)
+        and not is_vision_model(tag)
+        and not is_decision_only_model(tag)
+    )
+
+
+def model_capability_score(tag: str) -> int:
+    """Capability ranking matching QuorumRAG AutoFusionRouter::model_capability_score."""
+    low = tag.strip().lower()
+    if "70b" in low:
+        return 700
+    if "32b" in low:
+        return 320
+    if "26b" in low or "27b" in low or low.startswith("glm-4.7") or low.startswith("glm-5"):
+        return 260
+    if "14b" in low or "13b" in low or "12b" in low:
+        return 140
+    if "9b" in low or "8b" in low or "7b" in low or low.startswith("glm4"):
+        return 80
+    if "4b" in low or "3b" in low:
+        return 35
+    if "1.5b" in low or "2b" in low:
+        return 20
+    if "0.5b" in low:
+        return 10
+    return 15
+
+
+def model_fits_free_memory(tag: str, free_ram_gb: float, free_vram_mb: float) -> bool:
+    """Evaluates strictly runtime free RAM & free VRAM against model parameter size (QuorumRAG parity)."""
+    low = tag.strip().lower()
+    if "32b" in low or "70b" in low:
+        return free_ram_gb >= 48.0 or free_vram_mb >= 24_000.0
+    if "26b" in low or "27b" in low or low.startswith("glm-4.7") or low.startswith("glm-5"):
+        return can_run_gemma4_26b(free_ram_gb, free_vram_mb)
+    if "14b" in low or "12b" in low or "13b" in low:
+        return free_ram_gb >= 24.0 or free_vram_mb >= 14_000.0
+    if "nimble" in low:
+        return free_ram_gb >= NIMBLE_MIN_FREE_RAM_GB or free_vram_mb >= NIMBLE_MIN_FREE_VRAM_MB
+    if "9b" in low or "8b" in low or "7b" in low or low.startswith("glm4"):
+        return free_ram_gb >= 12.0 or free_vram_mb >= 4_500.0
+    if "4b" in low or "3b" in low:
+        return free_ram_gb >= 6.0 or free_vram_mb >= 2_000.0
+    return True
+
+
+def estimated_model_disk_gb(tag: str) -> float:
+    """Estimates minimum free disk headroom (GB) required before pulling a model tier (QuorumRAG parity)."""
+    low = tag.strip().lower()
+    if "70b" in low:
+        return 42.0
+    if "32b" in low or "26b" in low or "27b" in low or low.startswith("glm-4.7") or low.startswith("glm-5"):
+        return 18.0
+    if "14b" in low or "13b" in low or "12b" in low:
+        return 9.5
+    if "nimble" in low or "9b" in low or "8b" in low or "7b" in low or low.startswith("glm4"):
+        return 6.0
+    if "4b" in low or "3b" in low:
+        return 2.5
+    return 1.2
+
+
+def find_best_installed_chat_model(
+    preferred_tag: Optional[str],
+    hw: SystemHardwareResources,
+    installed_models: List[str],
+) -> Optional[str]:
+    """
+    Matches QuorumRAG AutoFusionRouter::find_best_installed_chat_model:
+    Strictly filters out embedding, vision, decision-only, and memory-ineligible models,
+    matching `preferred_tag` first and otherwise selecting the highest-capability eligible model.
+    """
+    if not installed_models:
+        return None
+
+    eligible = [
+        m
+        for m in installed_models
+        if is_synthesis_chat_model(m) and model_fits_free_memory(m, hw.free_ram_gb, hw.free_vram_mb)
+    ]
+    if not eligible:
+        return None
+
+    if preferred_tag:
+        pref_low = sanitize_model_tag(preferred_tag).lower()
+        pref_latest = f"{pref_low}:latest"
+        for cand in eligible:
+            cl = cand.strip().lower()
+            if cl == pref_low or cl == pref_latest or cl.startswith(f"{pref_low}:"):
+                return cand
+
+    eligible.sort(key=model_capability_score, reverse=True)
+    return eligible[0]
+
+
+def calculate_provision_plan(
+    requested_tag: str,
+    hw: SystemHardwareResources,
+    installed_models: List[str],
+) -> Dict[str, Any]:
+    """
+    Pre-provisioning resource calculation matching QuorumRAG's `ModelProvisionPlan`:
+    Evaluates live free RAM, free GPU VRAM, and free disk headroom BEFORE any `ollama pull`,
+    automatically downsizing oversized requests to a memory- and disk-safe tier.
+    """
+    clean_req = sanitize_model_tag(requested_tag)
+    _, rec_qwen, _, _, _, _ = size_models_by_available_memory(hw.free_ram_gb, hw.free_vram_mb)
+    rec_glm = size_glm_by_hardware(hw.free_ram_gb, hw.free_vram_mb)
+    rec_gemma = size_gemma_by_hardware(hw.free_ram_gb, hw.free_vram_mb)
+
+    req_fits_mem = bool(clean_req) and model_fits_free_memory(clean_req, hw.free_ram_gb, hw.free_vram_mb)
+    req_fits_disk = bool(clean_req) and hw.free_disk_gb >= estimated_model_disk_gb(clean_req)
+
+    if clean_req and req_fits_mem and req_fits_disk:
+        effective_tag = clean_req
+        downsized = False
+    elif clean_req.lower().startswith("glm") and hw.free_disk_gb >= estimated_model_disk_gb(rec_glm):
+        effective_tag = rec_glm
+        downsized = clean_req.lower() != rec_glm.lower()
+    elif clean_req.lower().startswith("gemma") and hw.free_disk_gb >= estimated_model_disk_gb(rec_gemma):
+        effective_tag = rec_gemma
+        downsized = clean_req.lower() != rec_gemma.lower()
+    elif hw.free_disk_gb >= estimated_model_disk_gb(rec_qwen):
+        effective_tag = rec_qwen
+        downsized = clean_req.lower() != rec_qwen.lower()
+    else:
+        effective_tag = "qwen2.5:1.5b"
+        downsized = clean_req.lower() != "qwen2.5:1.5b"
+
+    already_installed = is_model_installed(effective_tag, installed_models)
+    disk_sufficient = hw.free_disk_gb >= estimated_model_disk_gb(effective_tag)
+
+    return {
+        "requested_tag": clean_req,
+        "effective_tag": effective_tag,
+        "downsized_for_resources": downsized,
+        "already_installed": already_installed,
+        "disk_sufficient": disk_sufficient,
+        "free_ram_gb": hw.free_ram_gb,
+        "free_vram_mb": hw.free_vram_mb,
+        "free_disk_gb": hw.free_disk_gb,
+        "recommended_glm_tier": rec_glm,
+        "recommended_qwen_tier": rec_qwen,
+        "recommended_gemma_tier": rec_gemma,
+    }
+
+
+def select_model_calibrated(
+    requested_family: str,
+    prompt: str,
+    hw: SystemHardwareResources,
+    installed_models: List[str],
+    context_chars: int = 0,
+) -> Tuple[str, str, str]:
+    """
+    QuorumRAG AutoFusionRouter calibrated model selection:
+    Routes across `glm` (`glm-4.7-flash` / `glm4:9b`), `qwen` (`qwen2.5:*`), `gemma` (`gemma4:26b`/`gemma2:9b`/`gemma3:4b`/`gemma2:2b`),
+    or `auto` (code-dominated -> Qwen 2.5; long-context paper extraction/reasoning -> GLM when free RAM >= 12 GB or VRAM >= 4.5 GB),
+    always calibrating against actually installed memory-eligible chat/completion models!
+
+    Returns `(selected_family, selected_model_tag, rationale)`.
+    """
+    fam = (requested_family or "auto").strip().lower()
+    _, ideal_qwen, _, _, _, _ = size_models_by_available_memory(hw.free_ram_gb, hw.free_vram_mb)
+    ideal_glm = size_glm_by_hardware(hw.free_ram_gb, hw.free_vram_mb)
+    ideal_gemma = size_gemma_by_hardware(hw.free_ram_gb, hw.free_vram_mb)
+
+    if fam in ("glm", "glm4", "glm-4", "glm4_agentic"):
+        matched = find_best_installed_chat_model(ideal_glm, hw, installed_models)
+        if matched and matched.lower().startswith("glm"):
+            return "glm", matched, f"GLM ({matched}) explicitly selected and confirmed installed (free RAM {hw.free_ram_gb} GB)"
+        if matched:
+            return "glm", matched, f"GLM ({ideal_glm}) requested but not installed -> calibrated to installed {matched}"
+        return "glm", ideal_glm, f"GLM resource-sized tier: {ideal_glm} (free RAM {hw.free_ram_gb} GB, free VRAM {hw.free_vram_mb} MB)"
+
+    if fam in ("gemma", "gemma4", "gemma4_26b"):
+        pref = "gemma4:26b" if (fam == "gemma4_26b" and can_run_gemma4_26b(hw.free_ram_gb, hw.free_vram_mb)) else ideal_gemma
+        matched = find_best_installed_chat_model(pref, hw, installed_models)
+        if matched:
+            return "gemma", matched, f"Gemma calibrated to installed {matched}"
+        return "gemma", pref, f"Gemma resource-sized tier: {pref}"
+
+    if fam in ("qwen", "qwen25", "qwen2.5"):
+        matched = find_best_installed_chat_model(ideal_qwen, hw, installed_models)
+        if matched:
+            return "qwen", matched, f"Qwen 2.5 calibrated to installed {matched}"
+        return "qwen", ideal_qwen, f"Qwen 2.5 resource-sized tier: {ideal_qwen}"
+
+    # AutoFusion: code vs heavy multi-doc / paper reasoning (QuorumRAG parity)
+    lower = (prompt or "").lower()
+    is_code_task = any(
+        kw in lower
+        for kw in ("fn ", "def ", "impl ", "struct ", "rust", "python", "typescript", "code", "evolve", "verify")
+    )
+    is_long_doc_or_reasoning = (
+        context_chars > 4_000
+        or any(kw in lower for kw in ("langextract", "arxiv", "paper", "extract", "document", "abstract"))
+    )
+
+    if is_long_doc_or_reasoning and not is_code_task and (hw.free_ram_gb >= 12.0 or hw.free_vram_mb >= 4_500.0):
+        pref = ideal_glm
+        pref_fam = "glm"
+    elif is_code_task:
+        # Prefer installed GLM or Qwen calibrated to VRAM/RAM
+        pref = "qwen2.5:7b" if (4_500.0 <= hw.free_vram_mb < 14_000.0 and is_model_installed("qwen2.5:7b", installed_models)) else ideal_qwen
+        pref_fam = "qwen"
+    elif hw.free_ram_gb >= 12.0 or hw.free_vram_mb >= 4_500.0:
+        pref = ideal_glm
+        pref_fam = "glm"
+    else:
+        pref = ideal_qwen
+        pref_fam = "qwen"
+
+    matched = find_best_installed_chat_model(pref, hw, installed_models)
+    if matched:
+        ml = matched.lower()
+        res_fam = "glm" if ml.startswith("glm") else ("gemma" if ml.startswith("gemma") else ("qwen" if ml.startswith("qwen") else pref_fam))
+        return res_fam, matched, f"AutoFusion calibrated to installed memory-eligible model {matched}"
+
+    return pref_fam, pref, f"AutoFusion resource-sized recommendation: {pref} (free RAM {hw.free_ram_gb} GB, free VRAM {hw.free_vram_mb} MB, free disk {hw.free_disk_gb} GB)"
 
 
 # =============================================================================
@@ -580,14 +1015,16 @@ def probe_ollama_models(endpoint: str = "http://127.0.0.1:11434", timeout_sec: f
         return cached[1], list(cached[2])
 
     url = f"{endpoint.rstrip('/')}/api/tags"
-    req = urllib.request.Request(url, headers={"User-Agent": "ArxivToCode-DynaRot/1.0", "Origin": "null"})
+    # NOTE: Never send `Origin: null` to Ollama — Ollama's CORS filter rejects `Origin: null` with HTTP 403!
+    req = urllib.request.Request(url, headers={"User-Agent": "ArxivToCode-DynaRot/1.0"})
     opener = build_no_proxy_opener()
     try:
         with opener.open(req, timeout=timeout_sec) as resp:
             if resp.status == 200:
                 payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+                # Preserve exact model tag casing (required for HuggingFace GGUF tags like hf.co/...:Q4_K_M)
                 models = [
-                    sanitize_model_tag(str(m.get("name", "")).lower())
+                    sanitize_model_tag(str(m.get("name", "")).strip())
                     for m in payload.get("models", [])
                     if m.get("name")
                 ]
@@ -641,11 +1078,14 @@ class DynaRotModelRouter:
         prompt: str = "Synthesize production Python code from arXiv research paper and evolve with ShinkaEvolve + OpenEvolve",
         override_free_ram_gb: Optional[float] = None,
         override_free_vram_mb: Optional[float] = None,
+        override_free_disk_gb: Optional[float] = None,
+        model_family: str = "auto",
     ) -> DynaRotRoutingDecision:
         start_ts = time.perf_counter()
         hw = detect_live_hardware(
             override_free_ram_gb=override_free_ram_gb,
             override_free_vram_mb=override_free_vram_mb,
+            override_free_disk_gb=override_free_disk_gb,
         )
 
         complexity = self._calculate_complexity(prompt)
@@ -728,6 +1168,27 @@ class DynaRotModelRouter:
         target_ensemble = min(max_hw_ensemble, max(2, min(len(tier_pool), (complexity + 1) // 2)))
         suggested = tier_pool[:target_ensemble]
 
+        recommended_glm = size_glm_by_hardware(hw.free_ram_gb, hw.free_vram_mb)
+        recommended_gemma = size_gemma_by_hardware(hw.free_ram_gb, hw.free_vram_mb)
+        _, selected_tag, selection_rationale = select_model_calibrated(
+            requested_family=model_family,
+            prompt=prompt,
+            hw=hw,
+            installed_models=installed_models,
+        )
+        calibrated_installed = find_best_installed_chat_model(selected_tag, hw, installed_models)
+
+        # If caller explicitly requested GLM or Gemma family, honor it under resource constraints
+        fam_low = (model_family or "auto").strip().lower()
+        if fam_low in ("glm", "glm4", "glm-4", "glm4_agentic"):
+            primary_model = recommended_glm
+            shinka_heavy = recommended_glm
+        elif fam_low in ("gemma", "gemma4", "gemma4_26b"):
+            primary_model = recommended_gemma
+            shinka_heavy = recommended_gemma
+
+        provision_plan = calculate_provision_plan(primary_model, hw, installed_models)
+
         required_core_models = list(dict.fromkeys([primary_model, shinka_heavy, openevolve_fast]))
         missing = [
             m for m in required_core_models if not is_model_installed(m, installed_models)
@@ -753,25 +1214,40 @@ class DynaRotModelRouter:
             installed_ollama_models=installed_models,
             missing_models=missing,
             auto_install_commands=install_cmds,
-            routed_by="modelfusion_dynarot_pareto_ucb1" if ollama_online else "modelfusion_dynarot_heuristic_fallback",
+            routed_by="modelfusion_dynarot_quorum_calibrated" if ollama_online else "modelfusion_dynarot_heuristic_fallback",
             routing_duration_ms=elapsed_ms,
             hardware=hw.to_dict(),
+            recommended_glm_model=recommended_glm,
+            recommended_gemma_model=recommended_gemma,
+            calibrated_installed_model=calibrated_installed,
+            selection_rationale=selection_rationale,
+            provision_plan=provision_plan,
         )
 
     def provision_models_for_resources(
         self,
         override_free_ram_gb: Optional[float] = None,
         override_free_vram_mb: Optional[float] = None,
+        override_free_disk_gb: Optional[float] = None,
+        model_family: str = "auto",
         auto_pull: bool = True,
         pull_timeout_sec: int = 120,
     ) -> Dict[str, Any]:
         """
-        Determines optimal models for current runtime free RAM & VRAM using DynaRot
-        and installs/pulls missing models via Ollama (`ollama pull <model>`).
+        Determines optimal models for current runtime free RAM, VRAM & free disk using
+        ModelFusion DynaRot + QuorumRAG `calculate_provision_plan()` BEFORE any pull,
+        automatically downsizing oversized requests and pulling via Ollama (`ollama pull <model>`).
         """
+        hw = detect_live_hardware(
+            override_free_ram_gb=override_free_ram_gb,
+            override_free_vram_mb=override_free_vram_mb,
+            override_free_disk_gb=override_free_disk_gb,
+        )
         decision = self.route(
             override_free_ram_gb=override_free_ram_gb,
             override_free_vram_mb=override_free_vram_mb,
+            override_free_disk_gb=override_free_disk_gb,
+            model_family=model_family,
         )
         ollama_bin = shutil.which("ollama")
         ollama_online, installed_before = probe_ollama_models(
@@ -779,7 +1255,7 @@ class DynaRotModelRouter:
             timeout_sec=self.probe_timeout_sec,
         )
 
-        target_models = list(
+        raw_targets = list(
             dict.fromkeys(
                 [
                     decision.primary_model,
@@ -788,10 +1264,31 @@ class DynaRotModelRouter:
                 ]
             )
         )
+        # Apply QuorumRAG pre-provisioning RAM/VRAM/Disk downsizing gate to every target
+        target_models: List[str] = []
+        target_plans: Dict[str, Dict[str, Any]] = {}
+        for mt in raw_targets:
+            plan = calculate_provision_plan(mt, hw, installed_before)
+            eff = plan["effective_tag"]
+            if eff not in target_plans:
+                target_plans[eff] = plan
+                target_models.append(eff)
 
         pull_results: List[Dict[str, Any]] = []
         for model_tag in target_models:
             clean_tag = sanitize_model_tag(model_tag)
+            plan = target_plans[clean_tag]
+            if not plan["disk_sufficient"]:
+                pull_results.append(
+                    {
+                        "model": clean_tag,
+                        "status": "skipped_insufficient_disk",
+                        "free_disk_gb": plan["free_disk_gb"],
+                        "required_disk_gb": estimated_model_disk_gb(clean_tag),
+                        "command": f"ollama pull {clean_tag}",
+                    }
+                )
+                continue
             if is_model_installed(clean_tag, installed_before):
                 pull_results.append(
                     {
