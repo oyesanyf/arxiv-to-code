@@ -60,6 +60,7 @@ def prepare_paper_workspace(
     evolved_dir = paper_dir / "evolved"
     elites_dir = evolved_dir / "elites"
     rl_dir = paper_dir / "rl"
+    verified_dir = paper_dir / "verified"
 
     for d in (paper_dir, src_dir, eval_dir):
         d.mkdir(parents=True, exist_ok=True)
@@ -72,6 +73,7 @@ def prepare_paper_workspace(
         "evolved_dir": evolved_dir,
         "elites_dir": elites_dir,
         "rl_dir": rl_dir,
+        "verified_dir": verified_dir,
         "folder_name": Path(folder_name),
     }
 
@@ -86,6 +88,7 @@ def write_organized_paper_artifacts(
     dynarot_decision: Optional[Dict[str, Any]] = None,
     verification_report: Optional[Dict[str, Any]] = None,
     rl_report: Optional[Dict[str, Any]] = None,
+    repaired_code: Optional[str] = None,
 ) -> Dict[str, str]:
     """
     Writes all organized paper artifacts (`src/`, `eval/`, `evolved/`, `metadata.json`,
@@ -168,9 +171,18 @@ def write_organized_paper_artifacts(
         rl_json_path.write_text(json.dumps(rl_report_clean, indent=2), encoding="utf-8")
         rl_report_path_str = str(rl_json_path)
 
-    # 3c. Save LLM + Deterministic verification report if --verify-llm / --verify-panel ran
+    # 3c. Save LLM + Deterministic verification report & repaired module if --verify-llm / --verify-panel / --auto-repair ran
     verification_report_path_str = ""
+    repaired_module_path_str = ""
+    if repaired_code:
+        verified_dir = paths["verified_dir"]
+        verified_dir.mkdir(parents=True, exist_ok=True)
+        repaired_dest = verified_dir / f"repaired_arxiv_{id_slug}.py"
+        repaired_dest.write_text(repaired_code, encoding="utf-8")
+        repaired_module_path_str = str(repaired_dest)
     if verification_report is not None:
+        if repaired_module_path_str and isinstance(verification_report.get("auto_repair"), dict):
+            verification_report["auto_repair"]["repaired_module_path"] = repaired_module_path_str
         ver_json_path = paper_dir / "verification_report.json"
         ver_json_path.write_text(json.dumps(verification_report, indent=2), encoding="utf-8")
         verification_report_path_str = str(ver_json_path)
@@ -196,6 +208,7 @@ def write_organized_paper_artifacts(
                 "verification_mode": verification_report.get("verification_mode"),
                 "llm_verified": verification_report.get("llm_verified"),
                 "verifier_model": verification_report.get("verifier_model"),
+                "auto_repair": verification_report.get("auto_repair", {}),
             }
             if verification_report is not None
             else {}
@@ -225,6 +238,7 @@ def write_organized_paper_artifacts(
             "rl_policy": rl_policy_path_str,
             "rl_trace_pool": rl_trace_pool_path_str,
             "verification_report": verification_report_path_str,
+            "repaired_module": repaired_module_path_str,
         },
         "generated_at_epoch": round(time.time(), 2),
     }
@@ -272,14 +286,28 @@ def write_organized_paper_artifacts(
     if verification_report is not None:
         v_llm = verification_report.get("llm_audit", {})
         v_det = verification_report.get("deterministic_checks", {})
+        v_rep = verification_report.get("auto_repair") or {}
         verify_section = (
-            "## LLM & Deterministic Code Verification (`--verify-llm`)\n"
+            "## LLM & Deterministic Code Verification (`--verify-llm` / `--verify-panel` / `--auto-repair`)\n"
             f"- **Verdict**: `{verification_report.get('verdict', 'N/A')}` (`{verification_report.get('overall_score', 0.0)}/100`)\n"
             f"- **Mode**: `{verification_report.get('verification_mode', '')}` "
             f"(Model: `{verification_report.get('verifier_model', '')}`, LLM Executed: `{verification_report.get('llm_verified', False)}`)\n"
-            f"- **Deterministic Gate**: Tests `{v_det.get('runtime_tests_passed', 0)}/{v_det.get('runtime_tests_total', 4)}`, "
+            f"- **Deterministic Gate**: Lint=`{'PASS' if v_det.get('linter_passed') else 'FAIL'}`, "
+            f"Mypy=`{'PASS' if v_det.get('mypy_passed') else 'FAIL'}` (`{v_det.get('mypy_issue_count', 0)}` errs), "
+            f"Fuzz=`{'PASS' if v_det.get('fuzz_passed') else 'FAIL'}` (`{v_det.get('fuzz_properties_checked', 0)}` props), "
+            f"Pytest=`{'PASS' if v_det.get('pytest_passed') else 'FAIL'}`, "
+            f"Tests `{v_det.get('runtime_tests_passed', 0)}/{v_det.get('runtime_tests_total', 7)}`, "
             f"HMAC Constant-Time=`{v_det.get('constant_time_hmac_used', False)}`, "
             f"Zero Dangerous Calls=`{v_det.get('zero_dangerous_calls', False)}`\n"
+            + (
+                f"- **Auto-Repair Loop**: `repaired={v_rep.get('repaired', False)}`, "
+                f"`converged_clean={v_rep.get('converged_clean', False)}`, "
+                f"`attempts={v_rep.get('repair_attempts', 0)}/{v_rep.get('max_repair_attempts', 0)}`, "
+                f"`{v_rep.get('initial_verdict', '')} ({v_rep.get('initial_score', 0.0)}) -> "
+                f"{v_rep.get('final_verdict', '')} ({v_rep.get('final_score', 0.0)})`\n"
+                if v_rep
+                else ""
+            )
             + (
                 f"- **LLM Judge Scores**: Fidelity `{v_llm.get('paper_fidelity_score', 0.0)}/100` | "
                 f"Correctness `{v_llm.get('correctness_score', 0.0)}/100` | "
@@ -308,6 +336,11 @@ def write_organized_paper_artifacts(
         "- [`langextract_report.html`](langextract_report.html) — Interactive Google LangExtract source-grounded HTML report\n"
         "- [`extraction_results.jsonl`](extraction_results.jsonl) — Google LangExtract JSONL output\n"
         "- [`metadata.json`](metadata.json) — Full paper metadata, rank breakdown & grounded extractions\n"
+        + (
+            f"- [`verified/repaired_arxiv_{id_slug}.py`](verified/repaired_arxiv_{id_slug}.py) — Auto-repaired verified Python module\n"
+            if repaired_module_path_str
+            else ""
+        )
         + (
             "- [`verification_report.json`](verification_report.json) — Deterministic + LLM-as-a-Judge verification scorecard\n"
             if verification_report is not None
@@ -389,6 +422,9 @@ def write_organized_paper_artifacts(
         "verification_report": (
             f"{rel_folder}/verification_report.json" if verification_report else ""
         ),
+        "repaired_module": (
+            f"{rel_folder}/verified/repaired_arxiv_{id_slug}.py" if repaired_module_path_str else ""
+        ),
         "updated_at": round(time.time(), 2),
     }
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -453,6 +489,7 @@ def write_organized_paper_artifacts(
         "rl_policy": rl_policy_path_str,
         "rl_trace_pool": rl_trace_pool_path_str,
         "verification_report": verification_report_path_str,
+        "repaired_module": repaired_module_path_str,
         "manifest_json": str(manifest_path),
         "index_md": str(index_path),
     }

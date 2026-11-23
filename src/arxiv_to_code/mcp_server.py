@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from .code_repair import auto_repair_generated_code as _auto_repair_generated_code_impl
 from .dream_rsi_engine import run_dream_rsi_rl_optimization as _run_dream_rsi_rl_impl
 from .dynarot import DynaRotModelRouter
 from .evolve_engine import run_combined_shinka_openevolve
@@ -340,13 +341,16 @@ async def generate_python_code_from_paper(
     rl_cycles: int = 3,
     verify_llm: bool = False,
     verify_model: str = "",
+    auto_repair: bool = False,
+    max_repair_attempts: int = 3,
 ) -> str:
     """
     Fetch an arXiv paper by ID (e.g. '2608.15888' or '2603.02277'), run Google LangExtract
     3-class character-interval source grounding, synthesize complete production Python code
     with `# EVOLVE-BLOCK-START` / `# EVOLVE-BLOCK-END` markers and unit tests, optionally
     evolve it with ShinkaEvolve + OpenEvolve, optionally optimize with Dream-RSI RL (`use_rl=True`),
-    and optionally verify it with an LLM judge.
+    optionally verify it with Ruff + mypy --strict + property-based fuzzing + pytest + LLM judge,
+    and optionally auto-repair any failing gate (`auto_repair=True`).
     """
     try:
         clean_id = normalize_arxiv_id(arxiv_id)
@@ -400,14 +404,14 @@ async def generate_python_code_from_paper(
             rl_report = {k: v for k, v in rl_raw.items() if k != "replay_worlds_serialized"}
 
         verification_report = None
-        if verify_llm:
+        if verify_llm or auto_repair:
             cands = [(0.0, "synthesized", code_bundle["production_python_code"])]
             if evolution_report is not None:
                 cands.append((float(evolution_report["champion_metrics"]["total_fitness"]), "evolved_champion", evolution_report["champion_candidate"]["source_code"]))
             if rl_report is not None:
                 cands.append((float(rl_report["champion_metrics"]["total_fitness"]), "rl_dream_rsi_champion", rl_report["champion_candidate"]["source_code"]))
             _, stage_label, target_code = max(cands, key=lambda x: x[0])
-            verification_report = _verify_generated_python_code_impl(
+            ver_obj = _verify_generated_python_code_impl(
                 source_code=target_code,
                 paper=paper,
                 extractions=extractions,
@@ -415,7 +419,26 @@ async def generate_python_code_from_paper(
                 model_id=verify_model.strip() or None,
                 dynarot_decision=dynarot_decision,
                 enable_llm=True,
-            ).to_dict()
+            )
+            if auto_repair:
+                rep_res = _auto_repair_generated_code_impl(
+                    source_code=target_code,
+                    paper=paper,
+                    extractions=extractions,
+                    code_stage=stage_label,
+                    initial_report=ver_obj,
+                    max_repair_attempts=max(1, int(max_repair_attempts)),
+                    model_id=verify_model.strip() or None,
+                    dynarot_decision=dynarot_decision,
+                    enable_llm=True,
+                )
+                ver_obj = rep_res.final_verification_report
+                verification_report = ver_obj.to_dict()
+                verification_report["auto_repair"] = rep_res.to_summary_dict()
+                if rep_res.repaired:
+                    code_bundle["repaired_python_code"] = rep_res.repaired_source_code
+            else:
+                verification_report = ver_obj.to_dict()
 
         return json.dumps(
             {
@@ -562,13 +585,16 @@ async def verify_generated_python_code(
     panel_models: str = "",
     panel_mode: str = "multi-model",
     auto_provision: bool = False,
+    auto_repair: bool = False,
+    max_repair_attempts: int = 3,
 ) -> str:
     """
     Verifies generated or evolved Python code against the arXiv paper's grounded spans,
-    mathematical formulations, and security invariants using a fail-closed Deterministic AST +
-    Runtime Test Gate combined with either a single Open-Weight LLM Judge or a full ModelFusion
-    Panel-of-Models (`use_panel=True`: GLM + Qwen + DeepSeek + Gemma + minority-preserving Judge),
-    optionally auto-provisioning Ollama & resource-fitted models (`auto_provision=True`).
+    mathematical formulations, and security invariants using a fail-closed Layer-1 Gate
+    (AST + Security + Ruff/AST Lint + mypy --strict + Property-Based Fuzzing + Subprocess pytest)
+    combined with either a single Open-Weight LLM Judge or a full ModelFusion Panel-of-Models
+    (`use_panel=True`), optionally auto-provisioning Ollama (`auto_provision=True`) and running
+    the iterative Auto-Repair retry loop (`auto_repair=True`) until all gates pass.
     """
     try:
         clean_id = normalize_arxiv_id(arxiv_id) or "2603.02277"
@@ -615,7 +641,27 @@ async def verify_generated_python_code(
                 model_id=verify_model.strip() or None,
                 enable_llm=bool(enable_llm),
             )
-        return json.dumps(report.to_dict(), indent=2)
+        payload = report.to_dict()
+        if auto_repair:
+            repair_res = _auto_repair_generated_code_impl(
+                source_code=python_source_code,
+                paper=paper,
+                extractions=extractions,
+                code_stage=code_stage,
+                initial_report=report,
+                max_repair_attempts=max(1, int(max_repair_attempts)),
+                use_panel=bool(use_panel),
+                model_id=verify_model.strip() or None,
+                panel_size=panel_size,
+                panel_mode=panel_mode,
+                panel_models=explicit_list,
+                enable_llm=bool(enable_llm),
+            )
+            payload = repair_res.final_verification_report.to_dict()
+            payload["auto_repair"] = repair_res.to_summary_dict()
+            if repair_res.repaired:
+                payload["repaired_source_code"] = repair_res.repaired_source_code
+        return json.dumps(payload, indent=2)
     except Exception as exc:
         return json.dumps({"error": str(exc), "arxiv_id": arxiv_id}, indent=2)
 

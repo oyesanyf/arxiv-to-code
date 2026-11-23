@@ -77,8 +77,9 @@ The **ArXiv-to-Code All-in-One CLI** (`python arixv_to_code.py`) provides single
 | **4-Arm HMAC-Signed LangGraph Research & Evolution Swarm** | `python arixv_to_code.py --arxiv-id 2603.02277 --langgraph --evolve-mode hybrid` |
 | **Full JSON Status Report** | `python arixv_to_code.py --status` |
 | **List All 9 Universal MCP Tools** | `python arixv_to_code.py --list-tools` |
+| **Verify + Auto-Repair Retry Loop (Ruff + `mypy --strict` + Property Fuzzing + `pytest` + Ollama)** | `python arixv_to_code.py --arxiv-id 2608.15888 --evolves --rl --verify-panel --auto-repair --max-repairs 3` |
 | **Start Universal MCP Server (stdio JSON-RPC)** | `python arixv_to_code.py --mcp` |
-| **Run Built-In 9-Step End-to-End Self-Test** | `python arixv_to_code.py --test` |
+| **Run Built-In 10-Step End-to-End Self-Test** | `python arixv_to_code.py --test` |
 | **Run Full Pytest Suite (All Flags + LLM Verifier + MCP + DynaRot + Evolution)** | `python arixv_to_code.py --pytest` |
 
 ---

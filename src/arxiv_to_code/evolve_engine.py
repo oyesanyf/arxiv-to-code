@@ -440,23 +440,25 @@ SHINKA_STRUCTURAL_BREAKTHROUGHS: List[Tuple[str, str, str]] = [
     """
     ShinkaEvolve Structural Discovery 1: Single-Pass Tuple Comprehension & Fast Boundary Check.
     """
+    safe_prior = prior_wealth if (0.0 <= prior_wealth < 1e12) else 1.0
+    safe_alpha = alpha if alpha > 1e-6 else 1e-6
     corpus_lc = payload_corpus.lower()
-    matched_tuple = tuple(pat for pat in indicators if pat in corpus_lc)
+    matched_tuple = tuple(pat for pat in indicators if pat and pat.lower() in corpus_lc)
     match_count = len(matched_tuple)
 
     n_chars = len(corpus_lc)
     if n_chars == 0:
-        return (), 0.0, prior_wealth, False
+        return (), 0.0, safe_prior, False
 
     if match_count == 0:
         slash_density = (corpus_lc.count("/") + corpus_lc.count("|")) / (n_chars if n_chars > 16 else 16)
         nonconformity = min(0.35, slash_density * 2.5)
         likelihood_ratio = max(0.25, 1.0 + 4.0 * (nonconformity - 0.30))
-        martingale_wealth = prior_wealth * likelihood_ratio
-        return (), round(nonconformity, 6), round(martingale_wealth, 6), (martingale_wealth >= (1.0 / alpha))
+        martingale_wealth = safe_prior * likelihood_ratio
+        return (), round(nonconformity, 6), round(martingale_wealth, 6), (martingale_wealth * safe_alpha >= 1.0)
 
     nonconformity = min(1.0, 0.45 * match_count + 0.25)
-    martingale_wealth = prior_wealth * (1.0 + 4.0 * (nonconformity - 0.30)) * (25.0 * match_count)
+    martingale_wealth = safe_prior * (1.0 + 4.0 * (nonconformity - 0.30)) * (25.0 * match_count)
     return matched_tuple, round(nonconformity, 6), round(martingale_wealth, 6), True''',
     ),
     (
@@ -471,11 +473,13 @@ SHINKA_STRUCTURAL_BREAKTHROUGHS: List[Tuple[str, str, str]] = [
     """
     ShinkaEvolve Structural Discovery 2: Zero-Branch Benign Fast-Path & First-Token Dispatch.
     """
+    safe_prior = prior_wealth if (0.0 <= prior_wealth < 1e12) else 1.0
+    safe_alpha = alpha if alpha > 1e-6 else 1e-6
     if not payload_corpus:
-        return (), 0.0, prior_wealth, False
+        return (), 0.0, safe_prior, False
 
     corpus_lc = payload_corpus.lower()
-    matched_tuple = tuple(pat for pat in indicators if pat in corpus_lc)
+    matched_tuple = tuple(pat for pat in indicators if pat and pat.lower() in corpus_lc)
     if not matched_tuple:
         # Fast-path O(1) benign martingale decay without intermediate list allocations
         n_chars = len(corpus_lc)
@@ -486,12 +490,12 @@ SHINKA_STRUCTURAL_BREAKTHROUGHS: List[Tuple[str, str, str]] = [
         lr = 1.0 + 4.0 * (nonconformity - 0.30)
         if lr < 0.25:
             lr = 0.25
-        wealth = prior_wealth * lr
-        return (), nonconformity, wealth, (wealth * alpha >= 1.0)
+        wealth = safe_prior * lr
+        return (), nonconformity, wealth, (wealth * safe_alpha >= 1.0)
 
     m_len = len(matched_tuple)
     nonconformity = 1.0 if m_len >= 2 else 0.70
-    wealth = prior_wealth * (45.0 * m_len)
+    wealth = safe_prior * (45.0 * m_len)
     return matched_tuple, nonconformity, wealth, True''',
     ),
     (
@@ -506,14 +510,16 @@ SHINKA_STRUCTURAL_BREAKTHROUGHS: List[Tuple[str, str, str]] = [
     """
     ShinkaEvolve Structural Discovery 3: Wald SPRT Submartingale Early-Exit Kernel.
     """
+    safe_prior = prior_wealth if (0.0 <= prior_wealth < 1e12) else 1.0
+    safe_alpha = alpha if alpha > 1e-6 else 1e-6
     if not payload_corpus:
-        return (), 0.0, prior_wealth, False
+        return (), 0.0, safe_prior, False
 
     corpus_lc = payload_corpus.lower()
     first_hit: Optional[str] = None
     extra_hits: List[str] = []
     for pat in indicators:
-        if pat in corpus_lc:
+        if pat and pat.lower() in corpus_lc:
             if first_hit is None:
                 first_hit = pat
             else:
@@ -526,13 +532,13 @@ SHINKA_STRUCTURAL_BREAKTHROUGHS: List[Tuple[str, str, str]] = [
         nonconformity = ((corpus_lc.count("/") + corpus_lc.count("|")) * 2.2) / denom
         if nonconformity > 0.32:
             nonconformity = 0.32
-        wealth = prior_wealth * (0.88 + nonconformity)
-        return (), nonconformity, wealth, (wealth * alpha >= 1.0)
+        wealth = safe_prior * (0.88 + nonconformity)
+        return (), nonconformity, wealth, (wealth * safe_alpha >= 1.0)
 
     matched_tuple = (first_hit, *extra_hits) if extra_hits else (first_hit,)
     m_count = len(matched_tuple)
     nonconformity = 0.75 if m_count == 1 else 1.0
-    wealth = prior_wealth * (50.0 * m_count)
+    wealth = safe_prior * (50.0 * m_count)
     return matched_tuple, nonconformity, wealth, True''',
     ),
     (
@@ -549,14 +555,16 @@ def scan_and_score_payload(
     """
     ShinkaEvolve Structural Discovery 4: Collision-Free O(1) Bounded Signature Memoization.
     """
-    ind_key = indicators if isinstance(indicators, tuple) else tuple(indicators)
+    safe_prior = prior_wealth if (0.0 <= prior_wealth < 1e12) else 1.0
+    safe_alpha = alpha if alpha > 1e-6 else 1e-6
+    ind_key: Tuple[str, ...] = tuple(indicators)
     cache_key = (payload_corpus, ind_key)
     cached = _SHINKA_INLINE_CACHE.get(cache_key)
     if cached is not None:
         matched_tuple, nonconformity = cached
     else:
         corpus_lc = payload_corpus.lower()
-        matched_tuple = tuple(pat for pat in ind_key if pat in corpus_lc)
+        matched_tuple = tuple(pat for pat in ind_key if pat and pat.lower() in corpus_lc)
         if matched_tuple:
             nonconformity = 1.0 if len(matched_tuple) > 1 else 0.75
         else:
@@ -568,11 +576,11 @@ def scan_and_score_payload(
             _SHINKA_INLINE_CACHE[cache_key] = (matched_tuple, nonconformity)
 
     if matched_tuple:
-        wealth = prior_wealth * (40.0 * len(matched_tuple))
+        wealth = safe_prior * (40.0 * len(matched_tuple))
         return matched_tuple, nonconformity, wealth, True
 
-    wealth = prior_wealth * (0.90 + nonconformity * 0.5)
-    return (), nonconformity, wealth, (wealth * alpha >= 1.0)''',
+    wealth = safe_prior * (0.90 + nonconformity * 0.5)
+    return (), nonconformity, wealth, (wealth * safe_alpha >= 1.0)''',
     ),
 ]
 

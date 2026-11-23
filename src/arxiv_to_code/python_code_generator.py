@@ -228,10 +228,12 @@ def scan_and_score_payload(
     3. Shiryaev-Roberts / Doob submartingale wealth trajectory M_t.
     4. Stopping barrier decision (M_t >= 1 / alpha or matched indicators > 0).
     """
+    safe_prior = prior_wealth if (0.0 <= prior_wealth < 1e12) else 1.0
+    safe_alpha = alpha if alpha > 1e-6 else 1e-6
     corpus_lc = payload_corpus.lower()
     matched: List[str] = []
     for pat in indicators:
-        if pat in corpus_lc:
+        if pat and pat.lower() in corpus_lc:
             matched.append(pat)
 
     matched_tuple = tuple(matched)
@@ -254,8 +256,8 @@ def scan_and_score_payload(
     if match_count > 0:
         likelihood_ratio *= 25.0 * match_count
 
-    martingale_wealth = round(prior_wealth * likelihood_ratio, 6)
-    barrier = 1.0 / max(1e-6, alpha)
+    martingale_wealth = round(safe_prior * likelihood_ratio, 6)
+    barrier = 1.0 / safe_alpha
     triggered = (match_count > 0) or (martingale_wealth >= barrier)
 
     return matched_tuple, nonconformity, martingale_wealth, triggered

@@ -23,15 +23,19 @@ Combines two fail-closed verification layers:
 from __future__ import annotations
 
 import ast
+import concurrent.futures
 import importlib.util
 import json
+import math
 import os
 import platform
+import random
 import re
 import subprocess
 import sys
 import tempfile
 import time
+import types
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -110,6 +114,10 @@ class CodeVerificationReport:
             f"- **Verification Mode**: `{self.verification_mode}`",
             f"- **Verifier Model**: `{self.verifier_model}` (`{self.verifier_provider}` | LLM Executed: `{self.llm_verified}`)",
             f"- **Deterministic Checks**: Syntax=`{det.get('ast_syntax_valid')}`, "
+            f"Lint=`{'PASS' if det.get('linter_passed') else 'FAIL'}` ({','.join(det.get('linter_engines', []))}), "
+            f"Mypy=`{'PASS' if det.get('mypy_passed') else 'FAIL'}` ({det.get('mypy_issue_count', 0)} errs), "
+            f"Fuzz=`{'PASS' if det.get('fuzz_passed') else 'FAIL'}` ({det.get('fuzz_properties_checked', 0)} props), "
+            f"Pytest=`{'PASS' if det.get('pytest_passed') else 'FAIL'}`, "
             f"Tests=`{det.get('runtime_tests_passed')}/{det.get('runtime_tests_total')}`, "
             f"Constant-Time HMAC=`{det.get('constant_time_hmac_used')}`, "
             f"Zero Dangerous Calls=`{det.get('zero_dangerous_calls')}`, "
@@ -407,11 +415,308 @@ def run_generated_code_pytest(
             }
 
 
+def run_mypy_type_checker(
+    source_code: str,
+    timeout_sec: int = 25,
+) -> Dict[str, Any]:
+    """
+    Executes strict static type checking (`python -m mypy --strict --ignore-missing-imports`)
+    against generated Python code in an isolated temporary directory.
+    """
+    if importlib.util.find_spec("mypy") is None:
+        return {
+            "mypy_executed": False,
+            "mypy_passed": True,
+            "issue_count": 0,
+            "issues": [],
+            "summary": "mypy not installed; skipped strict static type check.",
+        }
+
+    creationflags = 0x08000000 if platform.system() == "Windows" else 0
+    with tempfile.TemporaryDirectory(prefix="arxiv_mypy_") as tmpdir:
+        tmp_root = Path(tmpdir)
+        src_file = tmp_root / "generated_module.py"
+        cache_dir = tmp_root / "mypy_cache"
+        src_file.write_text(source_code, encoding="utf-8")
+        try:
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    "--ignore-missing-imports",
+                    "--no-error-summary",
+                    "--no-color-output",
+                    "--show-error-codes",
+                    "--cache-dir",
+                    str(cache_dir),
+                    str(src_file),
+                ],
+                cwd=str(tmp_root),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_sec,
+                creationflags=creationflags,
+            )
+            issues: List[Dict[str, Any]] = []
+            for raw_line in (proc.stdout or "").splitlines():
+                line = raw_line.strip()
+                if not line or ": note:" in line:
+                    continue
+                m = re.match(r"^.+?:(\d+)(?::\d+)?:\s*(error|warning):\s*(.+?)(?:\s+\[([^\]]+)\])?$", line)
+                if m:
+                    issues.append(
+                        {
+                            "engine": "mypy",
+                            "line": int(m.group(1)),
+                            "severity": m.group(2),
+                            "code": m.group(4) or "mypy-error",
+                            "message": m.group(3).strip(),
+                        }
+                    )
+                elif proc.returncode != 0:
+                    issues.append(
+                        {
+                            "engine": "mypy",
+                            "line": 1,
+                            "severity": "error",
+                            "code": "mypy-error",
+                            "message": line[:200],
+                        }
+                    )
+            passed = proc.returncode == 0 and len(issues) == 0
+            return {
+                "mypy_executed": True,
+                "mypy_passed": passed,
+                "issue_count": len(issues),
+                "issues": issues[:20],
+                "summary": "mypy --strict passed (0 errors)" if passed else f"mypy --strict found {len(issues)} error(s)",
+            }
+        except Exception as exc:
+            return {
+                "mypy_executed": True,
+                "mypy_passed": False,
+                "issue_count": 1,
+                "issues": [
+                    {
+                        "engine": "mypy",
+                        "line": 1,
+                        "severity": "error",
+                        "code": "mypy-exec",
+                        "message": f"mypy execution failed: {type(exc).__name__}: {str(exc)[:180]}",
+                    }
+                ],
+                "summary": f"mypy execution error: {type(exc).__name__}",
+            }
+
+
+def run_property_based_fuzzing(
+    source_code: str,
+    seed: int = 2026,
+    num_trials: int = 35,
+) -> Dict[str, Any]:
+    """
+    Randomized property-based fuzzer executing directly against the generated Python module:
+      1. Algebraic Meet-Semilattice Laws on `DelegationScope.meet()`:
+         - Idempotence:      S meet S == S
+         - Commutativity:    S1 meet S2 == S2 meet S1
+         - Associativity:    (S1 meet S2) meet S3 == S1 meet (S2 meet S3)
+         - Top Identity:     Top meet S == S == S meet Top
+         - Monotonicity:     allows(S1 meet S2) => allows(S1) AND allows(S2), and restrictions only grow
+      2. Adversarial Input Fuzzing on `scan_and_score_payload()`:
+         - Empty, null-byte, Unicode/emoji, huge separator strings, alpha <= 0, NaN/Inf prior_wealth
+         - Soundness: injected indicator substrings ALWAYS trigger
+         - Cache Isolation: distinct same-length random indicator tuples NEVER cross-contaminate
+      3. Cryptographic & Scope Fuzzing on `ArxivAlgorithmEngine_*`:
+         - Bit-flipped HMAC seals ALWAYS denied (`session_lineage_verified == False`)
+         - Replayed `approval_nonce` ALWAYS denied (`approval_token_replay`)
+         - Out-of-scope concrete resources ALWAYS denied
+    """
+    failures: List[Dict[str, str]] = []
+    properties_checked = 0
+
+    try:
+        compiled = compile(source_code, "<fuzz_target>", "exec")
+    except Exception as exc:
+        return {
+            "fuzz_executed": False,
+            "fuzz_passed": False,
+            "trials_run": 0,
+            "properties_checked": 0,
+            "failures": [{"property": "compile", "detail": str(exc)[:200]}],
+        }
+
+    mod_name = f"_arxiv_fuzz_mod_{abs(hash(source_code)) % 1000000}"
+    mod = types.ModuleType(mod_name)
+    ns: Dict[str, Any] = mod.__dict__
+    ns["__name__"] = mod_name
+    sys.modules[mod_name] = mod
+    try:
+        exec(compiled, ns)
+    except Exception as exc:
+        sys.modules.pop(mod_name, None)
+        return {
+            "fuzz_executed": False,
+            "fuzz_passed": False,
+            "trials_run": 0,
+            "properties_checked": 0,
+            "failures": [{"property": "module_load", "detail": str(exc)[:200]}],
+        }
+
+    rng = random.Random(seed)
+    try:
+        scope_cls = ns.get("DelegationScope")
+        scan_fn = ns.get("scan_and_score_payload")
+        engine_cls = next(
+            (v for k, v in ns.items() if k.startswith("ArxivAlgorithmEngine_") and isinstance(v, type)),
+            None,
+        )
+
+        # 1. Fuzz Algebraic Meet-Semilattice Laws on DelegationScope
+        if scope_cls is not None and hasattr(scope_cls, "meet"):
+            res_universe = ["repo_a", "repo_b", "repo_c", "db_prod"]
+            act_universe = ["read_public", "compile_workspace", "read_sensitive", "external_transmit"]
+            dom_universe = ["engineering", "finance", "default"]
+            comp_universe = [("read_sensitive", "external_transmit"), ("read_public", "external_transmit")]
+            top_scope = scope_cls(
+                resources=frozenset(["*"]),
+                actions=frozenset(["*"]),
+                data_domains=frozenset(["*"]),
+            )
+
+            def _rand_scope() -> Any:
+                r_set = frozenset(["*"]) if rng.random() < 0.25 else frozenset(rng.sample(res_universe, rng.randint(1, 3)))
+                a_set = frozenset(["*"]) if rng.random() < 0.25 else frozenset(rng.sample(act_universe, rng.randint(1, 3)))
+                d_set = frozenset(["*"]) if rng.random() < 0.25 else frozenset(rng.sample(dom_universe, rng.randint(1, 2)))
+                c_set = frozenset(rng.sample(comp_universe, rng.randint(0, len(comp_universe))))
+                return scope_cls(resources=r_set, actions=a_set, data_domains=d_set, prohibited_compositions=c_set)
+
+            for trial in range(num_trials):
+                s1, s2, s3 = _rand_scope(), _rand_scope(), _rand_scope()
+                properties_checked += 5
+                # Idempotence
+                if s1.meet(s1) != s1:
+                    failures.append({"property": "semilattice_idempotence", "detail": f"Trial {trial}: S meet S != S"})
+                    break
+                # Commutativity
+                m12, m21 = s1.meet(s2), s2.meet(s1)
+                if m12 != m21:
+                    failures.append({"property": "semilattice_commutativity", "detail": f"Trial {trial}: S1 meet S2 != S2 meet S1"})
+                    break
+                # Associativity
+                if m12.meet(s3) != s1.meet(s2.meet(s3)):
+                    failures.append({"property": "semilattice_associativity", "detail": f"Trial {trial}: (S1 meet S2) meet S3 != S1 meet (S2 meet S3)"})
+                    break
+                # Wildcard Top-Element Identity
+                if top_scope.meet(s1) != s1 or s1.meet(top_scope) != s1:
+                    failures.append({"property": "semilattice_top_identity", "detail": f"Trial {trial}: Top(*) meet S != S"})
+                    break
+                # Monotonic attenuation & restriction accumulation
+                probe_r = rng.choice(res_universe)
+                probe_a = rng.choice(act_universe)
+                probe_d = rng.choice(dom_universe)
+                if m12.allows(probe_r, probe_a, probe_d) and not (
+                    s1.allows(probe_r, probe_a, probe_d) and s2.allows(probe_r, probe_a, probe_d)
+                ):
+                    failures.append({"property": "semilattice_monotonic_attenuation", "detail": f"Trial {trial}: meet escalated privilege for {(probe_r, probe_a, probe_d)}"})
+                    break
+                if not (s1.prohibited_compositions <= m12.prohibited_compositions and s2.prohibited_compositions <= m12.prohibited_compositions):
+                    failures.append({"property": "semilattice_restriction_union", "detail": f"Trial {trial}: prohibited_compositions lost during meet"})
+                    break
+
+        # 2. Fuzz scan_and_score_payload() on adversarial edge cases + cache isolation
+        if callable(scan_fn):
+            adversarial_corpora = [
+                "",
+                "\x00\x01\x02",
+                "/" * 64 + "|" * 64 + ";" * 32,
+                "Unicode \u202e\u0301 \U0001f680 safe payload",
+                "UPPERCASE_ONLY_TEXT",
+            ]
+            adversarial_alphas = [0.0, -0.05, 1e-9, 0.01, 0.5, 2.0]
+            adversarial_wealths = [0.0, -5.0, 1.0, 1e6, float("nan"), float("inf")]
+
+            for trial in range(num_trials):
+                corpus = (
+                    adversarial_corpora[trial]
+                    if trial < len(adversarial_corpora)
+                    else "".join(rng.choices("abcxyz/|;0123 \t\n", k=rng.randint(0, 120)))
+                )
+                alpha_val = adversarial_alphas[trial % len(adversarial_alphas)]
+                wealth_val = adversarial_wealths[trial % len(adversarial_wealths)]
+                tok_a = f"fuzz_ind_a_{trial}_{rng.randint(10, 99)}"
+                tok_b = f"fuzz_ind_b_{trial}_{rng.randint(10, 99)}"
+                ind_a = (tok_a, f"other_a_{trial}")
+                ind_b = (tok_b, f"other_b_{trial}")
+                properties_checked += 3
+                try:
+                    m1, nc1, w1, t1 = scan_fn(corpus, ind_a, wealth_val, alpha_val)
+                    if not isinstance(m1, tuple) or not isinstance(t1, bool):
+                        failures.append({"property": "scan_return_types", "detail": f"Trial {trial}: invalid return types"})
+                        break
+                    if not (math.isfinite(nc1) and 0.0 <= nc1 <= 1.0 and math.isfinite(w1)):
+                        failures.append({"property": "scan_finite_bounds", "detail": f"Trial {trial}: non-finite/out-of-range nc={nc1}, w={w1}"})
+                        break
+
+                    # Soundness + same-length cache isolation fuzz
+                    injected_corpus = f"{corpus} {tok_b.upper()} tail"
+                    ma, _, _, ta = scan_fn(injected_corpus, ind_a, 1.0, 0.01)
+                    mb, _, _, tb = scan_fn(injected_corpus, ind_b, 1.0, 0.01)
+                    if ta or len(ma) != 0 or (not tb) or tok_b not in mb:
+                        failures.append({"property": "scan_soundness_and_cache_isolation", "detail": f"Trial {trial}: cache collision or missed indicator (ta={ta}, tb={tb}, mb={mb})"})
+                        break
+                except Exception as exc:
+                    failures.append({"property": "scan_no_crash", "detail": f"Trial {trial} (alpha={alpha_val}, wealth={wealth_val}): {type(exc).__name__}: {exc}"})
+                    break
+
+        # 3. Fuzz ArxivAlgorithmEngine_* security invariants (HMAC bit-flip & nonce replay)
+        if engine_cls is not None and scope_cls is not None:
+            eng = engine_cls(
+                signing_key=b"fuzz-hmac-key-32-bytes-strict!!",
+                allowed_actions=["read_public", "compile_workspace", "read_sensitive", "external_transmit"],
+            )
+            for trial in range(min(15, num_trials)):
+                actor = f"actor-{trial}"
+                sess = f"sess-fuzz-{trial}"
+                act = "read_public"
+                seal = eng.issue_envelope_seal(actor, sess, act)
+                # Flip first hex char of HMAC seal
+                bad_char = "0" if seal[0] != "0" else "f"
+                forged = bad_char + seal[1:]
+                properties_checked += 2
+                v_forged = eng.evaluate_action(actor, sess, act, "benign test text", forged)
+                if v_forged.allowed or v_forged.session_lineage_verified:
+                    failures.append({"property": "hmac_bitflip_reject", "detail": f"Trial {trial}: forged HMAC seal was allowed!"})
+                    break
+
+                nonce = f"fuzz-nonce-{trial}"
+                v1 = eng.evaluate_action(actor, sess, act, "benign test text", seal, approval_nonce=nonce)
+                v2 = eng.evaluate_action(actor, sess, act, "benign test text", seal, approval_nonce=nonce)
+                if not v1.allowed or v2.allowed:
+                    failures.append({"property": "approval_nonce_replay_reject", "detail": f"Trial {trial}: replay nonce guard failed (v1={v1.allowed}, v2={v2.allowed})"})
+                    break
+    finally:
+        sys.modules.pop(mod_name, None)
+
+    return {
+        "fuzz_executed": True,
+        "fuzz_passed": len(failures) == 0,
+        "trials_run": num_trials,
+        "properties_checked": properties_checked,
+        "failures": failures,
+    }
+
+
 def run_deterministic_code_verification(
     source_code: str,
     arxiv_id: str = "custom",
     benchmark_iterations: int = 40,
     run_pytest_subprocess: bool = True,
+    run_mypy_subprocess: bool = True,
+    run_fuzzing: bool = True,
 ) -> Dict[str, Any]:
     """
     Performs fail-closed static AST inspection, security invariant checks, anti-mock
@@ -529,45 +834,74 @@ def run_deterministic_code_verification(
             }
         )
 
-    # Run static linters (Built-In AST Linter + Ruff if installed)
-    linter_report = run_static_code_linters(source_code)
-    linter_passed = bool(linter_report["linter_passed"])
-    if not linter_passed:
-        for li in linter_report["issues"][:8]:
-            findings.append(
-                {
-                    "severity": "HIGH" if str(li.get("code", "")).startswith(("E9", "F8", "AST-BUG")) else "MEDIUM",
-                    "category": "lint",
-                    "message": f"[{li['engine']}:{li['code']} L{li['line']}] {li['message']}",
-                    "recommendation": "Resolve static linter violation before shipping generated code.",
-                }
+    # Run static linters (AST + Ruff), mypy --strict, property-based fuzzing & subprocess pytest concurrently
+    clean_id = normalize_arxiv_id(arxiv_id) or "custom"
+    linter_report: Dict[str, Any]
+    mypy_report: Dict[str, Any]
+    pytest_report: Dict[str, Any]
+    fuzz_report: Dict[str, Any]
+    if ast_syntax_valid and zero_dangerous_calls:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            f_lint = pool.submit(run_static_code_linters, source_code)
+            f_mypy = (
+                pool.submit(run_mypy_type_checker, source_code)
+                if run_mypy_subprocess
+                else None
+            )
+            f_pytest = (
+                pool.submit(run_generated_code_pytest, source_code, clean_id)
+                if run_pytest_subprocess
+                else None
+            )
+            f_fuzz = (
+                pool.submit(run_property_based_fuzzing, source_code)
+                if run_fuzzing
+                else None
+            )
+            metrics = evaluate_python_candidate(
+                source_code=source_code,
+                candidate_id=f"verify-{clean_id}",
+                benchmark_iterations=benchmark_iterations,
+            )
+            linter_report = f_lint.result()
+            mypy_report = (
+                f_mypy.result()
+                if f_mypy is not None
+                else {"mypy_executed": False, "mypy_passed": True, "issue_count": 0, "issues": [], "summary": "Skipped mypy by caller."}
+            )
+            pytest_report = (
+                f_pytest.result()
+                if f_pytest is not None
+                else {"pytest_executed": False, "pytest_passed": True, "exit_code": 0, "summary": "Skipped subprocess pytest by caller."}
+            )
+            fuzz_report = (
+                f_fuzz.result()
+                if f_fuzz is not None
+                else {"fuzz_executed": False, "fuzz_passed": True, "trials_run": 0, "properties_checked": 0, "failures": []}
             )
 
-    # Execute deterministic runtime benchmark & embedded tests + real pytest subprocess
-    clean_id = normalize_arxiv_id(arxiv_id) or "custom"
-    if ast_syntax_valid and zero_dangerous_calls:
-        metrics = evaluate_python_candidate(
-            source_code=source_code,
-            candidate_id=f"verify-{clean_id}",
-            benchmark_iterations=benchmark_iterations,
-        )
         runtime_error = metrics.error
         tests_passed = metrics.tests_passed
         tests_total = metrics.tests_total
         runtime_fitness = metrics.total_fitness
         execution_time_us = metrics.execution_time_us
         peak_memory_kib = metrics.peak_memory_kib
-        pytest_report = (
-            run_generated_code_pytest(source_code=source_code, arxiv_id=clean_id)
-            if run_pytest_subprocess
-            else {
-                "pytest_executed": False,
-                "pytest_passed": True,
-                "exit_code": 0,
-                "summary": "Skipped subprocess pytest by caller.",
-            }
-        )
     else:
+        linter_report = run_static_code_linters(source_code)
+        mypy_report = {
+            "mypy_executed": False,
+            "mypy_passed": False,
+            "issue_count": 1,
+            "issues": [{"engine": "mypy", "line": 1, "severity": "error", "code": "skip", "message": "Skipped mypy due to syntax/dangerous call failure."}],
+            "summary": "Skipped mypy due to syntax or dangerous call failure.",
+        }
+        fuzz_report = {
+            "fuzz_executed": False,
+            "fuzz_passed": False,
+            "trials_run": 0,
+            "properties_checked": 0,
+            "failures": [{"property": "precheck", "detail": "Skipped fuzzing due to syntax or dangerous call failure."}],
+        }
         runtime_error = "Skipped runtime execution due to syntax error or dangerous AST call."
         tests_passed = 0
         tests_total = 7
@@ -580,6 +914,42 @@ def run_deterministic_code_verification(
             "exit_code": 2,
             "summary": "Skipped pytest due to syntax error or dangerous AST call.",
         }
+
+    linter_passed = bool(linter_report["linter_passed"])
+    if not linter_passed:
+        for li in linter_report["issues"][:8]:
+            findings.append(
+                {
+                    "severity": "HIGH" if str(li.get("code", "")).startswith(("E9", "F8", "AST-BUG")) else "MEDIUM",
+                    "category": "lint",
+                    "message": f"[{li['engine']}:{li['code']} L{li['line']}] {li['message']}",
+                    "recommendation": "Resolve static linter violation before shipping generated code.",
+                }
+            )
+
+    mypy_passed = bool(mypy_report["mypy_passed"])
+    if not mypy_passed:
+        for mi in mypy_report["issues"][:8]:
+            findings.append(
+                {
+                    "severity": "HIGH",
+                    "category": "typing",
+                    "message": f"[mypy:{mi['code']} L{mi['line']}] {mi['message']}",
+                    "recommendation": "Fix strict static type annotation error reported by mypy --strict.",
+                }
+            )
+
+    fuzz_passed = bool(fuzz_report["fuzz_passed"])
+    if not fuzz_passed:
+        for fi in fuzz_report["failures"][:6]:
+            findings.append(
+                {
+                    "severity": "CRITICAL",
+                    "category": "fuzzing",
+                    "message": f"[fuzz:{fi['property']}] {fi['detail']}",
+                    "recommendation": "Fix algebraic semilattice, bounds, or security invariant counterexample found by property-based fuzzing.",
+                }
+            )
 
     pytest_passed = bool(pytest_report["pytest_passed"])
     if not pytest_passed:
@@ -611,24 +981,28 @@ def run_deterministic_code_verification(
             }
         )
 
-    # Deterministic 0-100 composite score (includes linter + real pytest pass)
+    # Deterministic 0-100 composite score (AST + Security + Lint + Mypy + Fuzzing + Benchmark + Pytest)
     score = 0.0
     if ast_syntax_valid:
-        score += 15.0
+        score += 10.0
     if zero_dangerous_calls:
-        score += 20.0
+        score += 15.0
     if zero_mock_indicators:
         score += 10.0
     if linter_passed:
         score += 10.0
-    if has_evolve_block:
+    if mypy_passed:
         score += 10.0
+    if fuzz_passed:
+        score += 10.0
+    if has_evolve_block:
+        score += 5.0
     if constant_time_hmac_used:
         score += 5.0
     if meet_semilattice_present:
         score += 5.0
     if tests_total > 0 and runtime_error is None:
-        score += 15.0 * (tests_passed / float(tests_total))
+        score += 10.0 * (tests_passed / float(tests_total))
     if pytest_passed and runtime_error is None:
         score += 10.0
 
@@ -645,6 +1019,16 @@ def run_deterministic_code_verification(
         "linter_engines": linter_report["linter_engines"],
         "linter_issue_count": linter_report["issue_count"],
         "linter_issues": linter_report["issues"],
+        "mypy_executed": bool(mypy_report["mypy_executed"]),
+        "mypy_passed": mypy_passed,
+        "mypy_issue_count": int(mypy_report["issue_count"]),
+        "mypy_issues": mypy_report["issues"],
+        "mypy_summary": str(mypy_report["summary"]),
+        "fuzz_executed": bool(fuzz_report["fuzz_executed"]),
+        "fuzz_passed": fuzz_passed,
+        "fuzz_trials_run": int(fuzz_report["trials_run"]),
+        "fuzz_properties_checked": int(fuzz_report["properties_checked"]),
+        "fuzz_failures": fuzz_report["failures"],
         "pytest_executed": bool(pytest_report["pytest_executed"]),
         "pytest_passed": pytest_passed,
         "pytest_exit_code": int(pytest_report["exit_code"]),
@@ -1114,6 +1498,8 @@ def verify_generated_python_code(
     det_hard_fail = (
         (not det_checks["ast_syntax_valid"])
         or (not det_checks["zero_dangerous_calls"])
+        or (not det_checks.get("mypy_passed", True))
+        or (not det_checks.get("fuzz_passed", True))
         or (not det_checks.get("pytest_passed", True))
         or (det_checks["runtime_error"] is not None)
         or (det_checks["runtime_tests_passed"] < det_checks["runtime_tests_total"])

@@ -27,6 +27,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+from .code_repair import auto_repair_generated_code
 from .dream_rsi_engine import run_dream_rsi_rl_optimization
 from .dynarot import DynaRotModelRouter, size_models_by_available_memory
 from .evolve_engine import evaluate_python_candidate, run_combined_shinka_openevolve
@@ -112,8 +113,8 @@ EXECUTABLE CLI EXAMPLES (ALL FLAGS VIA python arixv_to_code.py)
   # 11. Generate, evolve (x2 rounds), and verify generated Python code using a local open-weight LLM
   python arixv_to_code.py --search "LLM container sandbox escape" --max-results 2 --evolves --evolve-count 2 --verify-llm
 
-  # 12. Optimize generated Python code via Dream-RSI RL (arXiv:2609.14858) + 5-baseline 95% CI benchmark + Panel Verify
-  python arixv_to_code.py --arxiv-id 2608.15888 --rl --rl-cycles 3 --rl-budget 12 --rl-benchmark --verify-panel
+  # 12. Optimize generated Python code via Dream-RSI RL (arXiv:2609.14858) + 5-baseline 95% CI benchmark + Panel Verify + Auto-Repair
+  python arixv_to_code.py --arxiv-id 2608.15888 --rl --rl-cycles 3 --rl-budget 12 --rl-benchmark --verify-panel --auto-repair --max-repairs 3
 
   # 13. List all 10 registered MCP tools or start the stdio JSON-RPC MCP server
   python arixv_to_code.py --list-tools
@@ -156,6 +157,9 @@ def normalize_cli_argv(argv: Optional[List[str]]) -> List[str]:
         "--dreamrsi": "--rl",
         "--use-rl": "--rl",
         "--rl-evolve": "--rl",
+        "--repair": "--auto-repair",
+        "--fix-code": "--auto-repair",
+        "--auto-fix": "--auto-repair",
     }
     for token in raw_list:
         if token.startswith("---"):
@@ -525,6 +529,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="multi-model",
         help="ModelFusion panel mode: 'multi-model' (distinct open-weight families, default) or 'multi-sample' (diverse temperatures/personas)",
     )
+    g_codegen.add_argument(
+        "--auto-repair",
+        "--repair",
+        "--fix-code",
+        "--auto-fix",
+        dest="auto_repair",
+        action="store_true",
+        help=(
+            "Enable iterative Auto-Repair retry loop (verify -> feed Ruff/mypy/fuzz/pytest/panel failures "
+            "back to local Ollama + deterministic structural patcher -> patch -> re-verify until every gate passes)"
+        ),
+    )
+    g_codegen.add_argument(
+        "--max-repairs",
+        type=int,
+        default=3,
+        help="Maximum auto-repair retry attempts when --auto-repair is enabled (default: 3)",
+    )
 
     g_dynarot = parser.add_argument_group("4. ModelFusion DynaRot Hardware Sizing & Auto-Provisioning")
     g_dynarot.add_argument(
@@ -754,7 +776,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         else ([args.verify_model.strip()] if args.verify_model and args.verify_model.strip() else None)
     )
 
-    needs_local_llm = bool(args.verify_panel or args.verify_llm or args.langextract_llm or args.evolve_llm or args.rl_llm)
+    needs_local_llm = bool(
+        args.verify_panel
+        or args.verify_llm
+        or args.auto_repair
+        or args.langextract_llm
+        or args.evolve_llm
+        or args.rl_llm
+    )
     should_auto_provision = (
         args.auto_provision
         or (
@@ -789,6 +818,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             or args.generate
             or args.verify_llm
             or args.verify_panel
+            or args.auto_repair
             or args.langextract_llm
         )
         if not has_pipeline_work:
@@ -831,6 +861,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             or args.generate
             or args.verify_llm
             or args.verify_panel
+            or args.auto_repair
             or args.langextract_llm
         )
         if not has_downstream_work:
@@ -848,6 +879,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             or args.langgraph
             or args.verify_llm
             or args.verify_panel
+            or args.auto_repair
             or args.langextract_llm
             or args.extract_doc
         )
@@ -876,6 +908,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             or args.generate
             or args.verify_llm
             or args.verify_panel
+            or args.auto_repair
             or args.langextract_llm
             or args.extract_doc
         )
@@ -1144,7 +1177,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         )
 
             verification_report = None
-            if args.verify_panel or args.verify_llm:
+            repaired_code_to_save: Optional[str] = None
+            if args.verify_panel or args.verify_llm or args.auto_repair:
                 # Pick highest-fitness passing champion across synthesized, evolved, and Dream-RSI RL
                 candidates_for_verify: List[tuple] = [
                     (0.0, "synthesized", code_bundle["production_python_code"]),
@@ -1166,6 +1200,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                         )
                     )
                 _, code_stage, target_code = max(candidates_for_verify, key=lambda x: x[0])
+                explicit_panel = (
+                    [m.strip() for m in args.panel_models.split(",") if m.strip()]
+                    if args.panel_models
+                    else None
+                )
                 print("\n================================================================================", flush=True)
                 if args.verify_panel:
                     print(
@@ -1179,11 +1218,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                     )
                 print("================================================================================", flush=True)
                 if args.verify_panel:
-                    explicit_panel = (
-                        [m.strip() for m in args.panel_models.split(",") if m.strip()]
-                        if args.panel_models
-                        else None
-                    )
                     with spinner(
                         f"Running ModelFusion Panel-of-Models + Judge Analysis on {code_stage} code",
                         enabled=show_ui,
@@ -1216,6 +1250,32 @@ def main(argv: Optional[List[str]] = None) -> int:
                         )
                         verification_report = ver_obj.to_dict()
 
+                if args.auto_repair:
+                    with spinner(
+                        f"Auto-Repair Loop (max {args.max_repairs} attempts): verifying & patching any Ruff/mypy/fuzz/pytest/LLM defects",
+                        enabled=show_ui,
+                    ):
+                        repair_res = auto_repair_generated_code(
+                            source_code=target_code,
+                            paper=item,
+                            extractions=item["extractions"],
+                            code_stage=code_stage,
+                            initial_report=ver_obj,
+                            max_repair_attempts=args.max_repairs,
+                            use_panel=bool(args.verify_panel),
+                            model_id=args.verify_model,
+                            panel_size=args.panel_size,
+                            panel_mode=args.panel_mode,
+                            panel_models=explicit_panel,
+                            dynarot_decision=dynarot_decision,
+                            enable_llm=True,
+                        )
+                    ver_obj = repair_res.final_verification_report
+                    verification_report = ver_obj.to_dict()
+                    verification_report["auto_repair"] = repair_res.to_summary_dict()
+                    if repair_res.repaired:
+                        repaired_code_to_save = repair_res.repaired_source_code
+
                 det_c = verification_report["deterministic_checks"]
                 llm_a = verification_report["llm_audit"]
                 print(
@@ -1234,11 +1294,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(
                     f"  Deterministic Gate    : AST={det_c['ast_syntax_valid']} | "
                     f"Lint={'PASS' if det_c.get('linter_passed') else 'FAIL'}({','.join(det_c.get('linter_engines', []))}) | "
+                    f"Mypy={'PASS' if det_c.get('mypy_passed') else 'FAIL'}({det_c.get('mypy_issue_count', 0)} errs) | "
+                    f"Fuzz={'PASS' if det_c.get('fuzz_passed') else 'FAIL'}({det_c.get('fuzz_properties_checked', 0)} props) | "
                     f"Pytest={'PASS' if det_c.get('pytest_passed') else 'FAIL'} | "
                     f"Tests={det_c['runtime_tests_passed']}/{det_c['runtime_tests_total']} | "
                     f"HMAC={det_c['constant_time_hmac_used']} | SafeCalls={det_c['zero_dangerous_calls']}",
                     flush=True,
                 )
+                if args.auto_repair and isinstance(verification_report.get("auto_repair"), dict):
+                    ar = verification_report["auto_repair"]
+                    print(
+                        f"  Auto-Repair Loop      : repaired={ar['repaired']} | clean={ar['converged_clean']} | "
+                        f"attempts={ar['repair_attempts']}/{ar['max_repair_attempts']} | "
+                        f"{ar['initial_verdict']}({ar['initial_score']}) -> {ar['final_verdict']}({ar['final_score']})",
+                        flush=True,
+                    )
                 panel_a = llm_a.get("panel_audit")
                 if panel_a:
                     ja = panel_a.get("judge_analysis", {})
@@ -1285,6 +1355,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     dynarot_decision=dynarot_decision.to_dict(),
                     verification_report=verification_report,
                     rl_report=rl_report,
+                    repaired_code=repaired_code_to_save,
                 )
 
             print("\n  [ORGANIZED OUTPUT ARTIFACTS]", flush=True)
@@ -1301,6 +1372,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"    Dream-RSI Report   : {saved_artifacts['rl_report']}", flush=True)
                 print(f"    Promoted RL Policy : {saved_artifacts['rl_policy']}", flush=True)
                 print(f"    Replay Worlds JSONL: {saved_artifacts['rl_trace_pool']}", flush=True)
+            if saved_artifacts.get("repaired_module"):
+                print(f"    Repaired Module    : {saved_artifacts['repaired_module']}", flush=True)
             if saved_artifacts.get("verification_report"):
                 print(f"    Verification Report: {saved_artifacts['verification_report']}", flush=True)
             print(f"    Workspace Index    : {saved_artifacts['index_md']}", flush=True)

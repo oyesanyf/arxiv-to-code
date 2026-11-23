@@ -66,6 +66,12 @@ Synthesizes a complete, runnable, zero-mock Python module (with `# EVOLVE-BLOCK-
   - `evolve` (`bool`, default: `False`)
   - `evolve_mode` (`str`, default: `"hybrid"`)
   - `generations` (`int`, default: `4`)
+  - `use_rl` (`bool`, default: `False`)
+  - `rl_cycles` (`int`, default: `3`)
+  - `verify_llm` (`bool`, default: `False`)
+  - `verify_model` (`str`, default: `""`)
+  - `auto_repair` (`bool`, default: `False` — enables iterative Verify -> Patch -> Re-Verify retry loop)
+  - `max_repair_attempts` (`int`, default: `3`)
 
 ### Tool 6: `evolve_python_code`
 Runs the combined **ShinkaEvolve + OpenEvolve** evolutionary search pipeline on a standalone Python program (or synthesizes one from `arxiv_id` if `python_source_code` is empty).
@@ -105,6 +111,8 @@ Verifies generated or evolved Python code against the arXiv paper's grounded spa
   - `panel_models` (`str`, default: `""` — optional comma-separated Ollama panelist list)
   - `panel_mode` (`str`, default: `"multi-model"` — `"multi-model"` or `"multi-sample"`)
   - `auto_provision` (`bool`, default: `False` — automatically installs/starts Ollama and pulls missing resource-fitted models before verification)
+  - `auto_repair` (`bool`, default: `False` — runs iterative Auto-Repair retry loop across Ruff, `mypy --strict`, Property-Based Fuzzing, `pytest`, and LLM/Panel findings until all gates pass)
+  - `max_repair_attempts` (`int`, default: `3`)
 
 ### Tool 10: `optimize_code_with_dream_rsi_rl`
 Runs **Dream-RSI Reinforcement Learning** (`arXiv:2609.14858`) over generated Python code: builds real online `DiscoveryTree` rollouts, converts them into frozen zero-cost Replay Worlds, optimizes meta-exploration policies offline via dreaming, explicitly labels the active backend (`official_google_research_dream_rsi` vs. `native_dream_rsi_replay_world_model`), and returns a 5-baseline matched-seed 95% Student-$t$ CI empirical superiority benchmark.

@@ -820,6 +820,8 @@ def run_model_panel_verification(
     det_hard_fail = (
         (not det_checks["ast_syntax_valid"])
         or (not det_checks["zero_dangerous_calls"])
+        or (not det_checks.get("mypy_passed", True))
+        or (not det_checks.get("fuzz_passed", True))
         or (not det_checks.get("pytest_passed", True))
         or (det_checks["runtime_error"] is not None)
         or (det_checks["runtime_tests_passed"] < det_checks["runtime_tests_total"])

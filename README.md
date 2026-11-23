@@ -138,6 +138,7 @@ generated/
 | **Start Universal MCP Server (stdio JSON-RPC)** | `python arixv_to_code.py --mcp` |
 | **Run Built-In 9-Step End-to-End Self-Test** | `python arixv_to_code.py --test` |
 | **Run Full Pytest Suite (All Flags + LLM Verifier + MCP + DynaRot + Evolution)** | `python arixv_to_code.py --pytest` |
+| **Verify + Auto-Repair Generated Code (Ruff + `mypy --strict` + Fuzzing + `pytest` + Panel)** | `python arixv_to_code.py --arxiv-id 2608.15888 --evolves --rl --verify-panel --auto-repair --max-repairs 3` |
 
 ### Run the Exhaustive Flag Test Suite & Execute Generated Champion Code
 ```powershell
@@ -178,9 +179,9 @@ Add to your IDE `mcp.json`:
 | 2 | `dynarot_hardware_route_and_install` | Live free RAM/VRAM probe, Pareto knee-point selection, compute split, and `ollama pull` provisioning. |
 | 3 | `search_and_rank_arxiv_papers` | Search arXiv, filter to novel papers, extract 3-class grounded spans, synthesize Python code, and optionally evolve. |
 | 4 | `extract_document_langextract` | Extract 3-class `CharInterval` spans from an arXiv ID or local `.pdf`/`.txt`/`.md` file + interactive HTML report. |
-| 5 | `generate_python_code_from_paper` | Synthesize complete, self-tested `EVOLVE-BLOCK` Python code from an arXiv paper (+ optional `evolve=True` and `verify_llm=True`). |
+| 5 | `generate_python_code_from_paper` | Synthesize complete, self-tested `EVOLVE-BLOCK` Python code from an arXiv paper (+ optional `evolve=True`, `use_rl=True`, `verify_llm=True`, `auto_repair=True`). |
 | 6 | `evolve_python_code` | Run `evolve_count` rounds of combined `ShinkaEvolve` + `OpenEvolve` (`sequential`, `parallel`, or `hybrid`) on Python code. |
 | 7 | `audit_defense_coverage` | Audit paper vectors and synthesized Python code across multi-ring containment boundaries. |
 | 8 | `run_langgraph_arxiv_to_code_swarm` | Execute the 4-Arm HMAC-SHA256 signed StateGraph Research & Evolution Swarm. |
-| 9 | `verify_generated_python_code` | Fail-closed Deterministic AST/Runtime Gate + Open-Weight LLM / ModelFusion Panel-of-Models verification. |
+| 9 | `verify_generated_python_code` | Fail-closed Layer-1 Gate (AST + Ruff + `mypy --strict` + Property-Based Fuzzing + `pytest`) + Open-Weight LLM / ModelFusion Panel-of-Models verification + optional iterative `auto_repair=True` retry loop. |
 | 10 | `optimize_code_with_dream_rsi_rl` | Dream-RSI Reinforcement Learning (`arXiv:2609.14858`): evolving Replay Worlds, zero-cost offline dreaming & 5-baseline 95% CI benchmark. |

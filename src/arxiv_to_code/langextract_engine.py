@@ -1452,7 +1452,7 @@ def save_langextract_artifacts(
             document_id=annotated_doc.document_id,
         )
         _real_lx.io.save_annotated_documents(
-            [real_doc],
+            iter([real_doc]),
             output_name=jsonl_filename,
             output_dir=str(out_dir),
         )
