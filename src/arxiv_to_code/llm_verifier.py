@@ -1067,14 +1067,16 @@ def _build_llm_verification_prompt(
     spans_block = "\n".join(spans_lines) if spans_lines else "  (No extracted spans provided)"
 
     # Keep code concise for fast VRAM-resident local open-weight model inference while preserving core logic
-    code_excerpt = source_code if len(source_code) <= 4800 else (
-        source_code[:3400] + "\n# ... [middle truncated for verifier context window] ...\n" + source_code[-1200:]
+    code_excerpt = source_code if len(source_code) <= 14000 else (
+        source_code[:10500] + "\n# ... [middle truncated for verifier context window] ...\n" + source_code[-3000:]
     )
 
     return (
         "You are a strict formal-methods, Python security, and ML systems code reviewer.\n"
         "Verify whether the generated Python module faithfully, safely, and correctly implements "
-        "the research paper's grounded concepts, mathematical formulations, and security countermeasures.\n\n"
+        "the research paper's grounded concepts, mathematical formulations, and security countermeasures.\n"
+        "Base your findings strictly on the actual Python source shown below; do not fabricate defects "
+        "that contradict passing executable Layer-1 tests/fuzzing unless you cite a concrete failing counterexample.\n\n"
         f"=== PAPER METADATA ===\n"
         f"arXiv ID: {paper.get('arxiv_id', 'custom')}\n"
         f"Title: {paper.get('title', 'Unknown')}\n"
@@ -1083,6 +1085,11 @@ def _build_llm_verification_prompt(
         f"{spans_block}\n\n"
         f"=== LAYER-1 DETERMINISTIC CHECK SUMMARY ===\n"
         f"AST Syntax Valid: {det_checks['ast_syntax_valid']} | "
+        f"Static Lint (Ruff+AST): {'PASS' if det_checks.get('linter_passed') else 'FAIL'} ({det_checks.get('linter_issue_count', 0)} issues) | "
+        f"Mypy --strict: {'PASS' if det_checks.get('mypy_passed') else 'FAIL'} ({det_checks.get('mypy_issue_count', 0)} errors) | "
+        f"Property-Based Fuzzing: {'PASS' if det_checks.get('fuzz_passed') else 'FAIL'} "
+        f"({det_checks.get('fuzz_properties_checked', 0)} algebraic/adversarial/crypto properties checked) | "
+        f"Subprocess Pytest: {'PASS' if det_checks.get('pytest_passed') else 'FAIL'} | "
         f"Unit Tests Passed: {det_checks['runtime_tests_passed']}/{det_checks['runtime_tests_total']} | "
         f"Runtime Fitness: {det_checks['runtime_fitness_score']}/100 | "
         f"Constant-Time HMAC: {det_checks['constant_time_hmac_used']} | "
@@ -1229,7 +1236,7 @@ def _invoke_ollama_llm_judge(
         "options": {
             "temperature": 0.1,
             "num_predict": 1000 if is_reasoning_model else 700,
-            "num_ctx": 4096,
+            "num_ctx": 8192,
         },
     }
     if is_reasoning_model:
@@ -1258,7 +1265,7 @@ def _invoke_ollama_llm_judge(
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
                     "format": "json",
-                    "options": {"temperature": 0.1, "num_predict": 900, "num_ctx": 4096},
+                    "options": {"temperature": 0.1, "num_predict": 900, "num_ctx": 8192},
                 }
             ).encode("utf-8")
             try:

@@ -36,7 +36,11 @@ from .dynarot import (
     DynaRotModelRouter,
     build_no_proxy_opener,
     detect_live_hardware,
+    estimated_model_disk_gb,
     find_best_installed_chat_model,
+    is_synthesis_chat_model,
+    model_capability_score,
+    model_fits_free_memory,
     probe_ollama_models,
     sanitize_model_tag,
     size_glm_by_hardware,
@@ -586,33 +590,58 @@ def request_ollama_code_patch(
         return None, f"ollama_error:{type(exc).__name__}"
 
 
-def _resolve_repair_ollama_model(
+def _resolve_repair_ollama_models(
     endpoint: str,
     requested_model: Optional[str],
     dynarot_decision: DynaRotRoutingDecision,
-) -> Tuple[bool, Optional[str]]:
-    """Probes local Ollama and selects the highest-capability installed chat/code model fitting free RAM/VRAM."""
+) -> Tuple[bool, List[str]]:
+    """
+    Probes local Ollama and returns a VRAM-resident-first ranked list of eligible
+    installed chat/code models fitting free RAM/VRAM so auto-repair prefers fast
+    GPU-resident models and rotates automatically if any model times out.
+    """
     ollama_online, installed_models = probe_ollama_models(endpoint=endpoint, timeout_sec=0.4)
     if not ollama_online or not installed_models:
-        return ollama_online, None
+        return ollama_online, []
     hw = detect_live_hardware()
-    recommended_glm = size_glm_by_hardware(hw.free_ram_gb, hw.free_vram_mb)
-    preferred = list(
-        dict.fromkeys(
-            [
-                *([sanitize_model_tag(requested_model)] if requested_model else []),
-                recommended_glm,
-                dynarot_decision.shinka_heavy_reasoning_model,
-                dynarot_decision.primary_model,
-                dynarot_decision.openevolve_fast_mutation_model,
-            ]
-        )
+    gpu_residency_gb = max(hw.gpu_vram_free_gb, hw.gpu_vram_total_gb * 0.85)
+    eligible = [
+        sanitize_model_tag(m)
+        for m in installed_models
+        if is_synthesis_chat_model(m) and model_fits_free_memory(m, hw.free_ram_gb, hw.free_vram_mb)
+    ]
+    eligible.sort(
+        key=lambda m: (
+            1 if (gpu_residency_gb >= 4.0 and estimated_model_disk_gb(m) <= (gpu_residency_gb + 0.5)) else 0,
+            model_capability_score(m),
+        ),
+        reverse=True,
     )
-    for cand in preferred:
-        hit = find_best_installed_chat_model(cand, hw, installed_models)
+
+    ordered: List[str] = []
+    if requested_model:
+        hit = find_best_installed_chat_model(sanitize_model_tag(requested_model), hw, installed_models)
         if hit is not None:
-            return True, sanitize_model_tag(hit)
-    return True, None
+            ordered.append(sanitize_model_tag(hit))
+
+    # Prefer VRAM-resident models first (e.g., glm4:9b, deepseek-r1:7b) before CPU-spilled larger models
+    for m in eligible:
+        if m not in ordered:
+            ordered.append(m)
+
+    if not ordered:
+        recommended_glm = size_glm_by_hardware(hw.free_ram_gb, hw.free_vram_mb)
+        for cand in (
+            recommended_glm,
+            dynarot_decision.shinka_heavy_reasoning_model,
+            dynarot_decision.primary_model,
+            dynarot_decision.openevolve_fast_mutation_model,
+        ):
+            hit = find_best_installed_chat_model(cand, hw, installed_models)
+            if hit is not None and sanitize_model_tag(hit) not in ordered:
+                ordered.append(sanitize_model_tag(hit))
+
+    return True, ordered
 
 
 # =============================================================================
@@ -706,23 +735,36 @@ def auto_repair_generated_code(
             duration_ms=round((time.perf_counter() - t0) * 1000.0, 2),
         )
 
-    # Probe Ollama once for Tier A repair model selection
-    ollama_online, repair_model = (
-        _resolve_repair_ollama_model(endpoint, model_id, dynarot_decision)
+    # Probe Ollama once for Tier A VRAM-prioritized repair model roster
+    ollama_online, repair_models = (
+        _resolve_repair_ollama_models(endpoint, model_id, dynarot_decision)
         if enable_llm
-        else (False, None)
+        else (False, [])
     )
 
     repaired_any = False
     history: List[RepairAttemptRecord] = []
+    init_gates_passed, init_gates_total = count_layer1_gates_passed(current_report.deterministic_checks)
+    # When all 9/9 Layer-1 deterministic gates already passed (100/100) and only a subjective LLM
+    # opinion kept the verdict from PASS, avoid spinning 3x120s rewrites — cap cosmetic LLM retries at 1.
+    effective_max_attempts = (
+        1
+        if (
+            init_gates_passed == init_gates_total
+            and float(current_report.deterministic_checks.get("deterministic_score", 0.0)) >= 100.0
+            and float(current_report.overall_score) >= 85.0
+        )
+        else max_attempts
+    )
 
-    for attempt in range(1, max_attempts + 1):
+    for attempt in range(1, effective_max_attempts + 1):
         at_start = time.perf_counter()
         defect_block, defect_list = build_defect_diagnostic_summary(current_report)
         before_rank = rank_verification_report(current_report)
         before_gates, _ = count_layer1_gates_passed(current_report.deterministic_checks)
         before_verdict = current_report.verdict
         before_score = float(current_report.overall_score)
+        repair_model = repair_models[(attempt - 1) % len(repair_models)] if repair_models else None
 
         if progress_callback is not None:
             progress_callback(
@@ -732,7 +774,7 @@ def auto_repair_generated_code(
         # Collect candidate patches: (strategy_name, model_label, det_fixes, patched_code, note)
         candidates: List[Tuple[str, str, List[str], str, str]] = []
 
-        # Tier A: Local Ollama LLM Repair
+        # Tier A: Local Ollama LLM Repair (rotates across VRAM-resident models per attempt)
         llm_status_note = ""
         if enable_llm and ollama_online and repair_model is not None:
             llm_code, llm_status = request_ollama_code_patch(

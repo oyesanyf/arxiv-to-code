@@ -674,25 +674,31 @@ def is_synthesis_chat_model(tag: str) -> bool:
 
 
 def model_capability_score(tag: str) -> int:
-    """Capability ranking matching QuorumRAG AutoFusionRouter::model_capability_score."""
+    """Capability ranking matching QuorumRAG AutoFusionRouter::model_capability_score, favoring official schema-reliable weights."""
     low = tag.strip().lower()
     if "70b" in low:
-        return 700
-    if "32b" in low:
-        return 320
-    if "26b" in low or "27b" in low or low.startswith("glm-4.7") or low.startswith("glm-5"):
-        return 260
-    if "14b" in low or "13b" in low or "12b" in low:
-        return 140
-    if "9b" in low or "8b" in low or "7b" in low or low.startswith("glm4"):
-        return 80
-    if "4b" in low or "3b" in low:
-        return 35
-    if "1.5b" in low or "2b" in low:
-        return 20
-    if "0.5b" in low:
-        return 10
-    return 15
+        base = 700
+    elif "32b" in low:
+        base = 320
+    elif "26b" in low or "27b" in low or low.startswith("glm-4.7") or low.startswith("glm-5"):
+        base = 260
+    elif "14b" in low or "13b" in low or "12b" in low:
+        base = 140
+    elif "9b" in low or "8b" in low or "7b" in low or low.startswith("glm4"):
+        base = 80
+    elif "4b" in low or "3b" in low:
+        base = 35
+    elif "1.5b" in low or "2b" in low:
+        base = 20
+    elif "0.5b" in low:
+        base = 10
+    else:
+        base = 15
+
+    # Prefer official instruct/reasoning weights over abliterated community fine-tunes that often break strict JSON output
+    if "abliterated" in low or "obliteratus" in low or "uncensored" in low:
+        return max(1, base - 65)
+    return base
 
 
 def model_fits_free_memory(tag: str, free_ram_gb: float, free_vram_mb: float) -> bool:

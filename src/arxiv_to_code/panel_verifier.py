@@ -44,6 +44,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .dynarot import (
     DynaRotModelRouter,
     detect_live_hardware,
+    estimated_model_disk_gb,
     is_synthesis_chat_model,
     model_capability_score,
     model_fits_free_memory,
@@ -270,7 +271,14 @@ def assemble_verification_panel(
         for m in installed_models
         if is_synthesis_chat_model(m) and model_fits_free_memory(m, hw.free_ram_gb, hw.free_vram_mb)
     ]
-    eligible_installed.sort(key=model_capability_score, reverse=True)
+    gpu_residency_gb = max(hw.gpu_vram_free_gb, hw.gpu_vram_total_gb * 0.85)
+    eligible_installed.sort(
+        key=lambda m: (
+            1 if (gpu_residency_gb >= 4.0 and estimated_model_disk_gb(m) <= (gpu_residency_gb + 0.5)) else 0,
+            model_capability_score(m),
+        ),
+        reverse=True,
+    )
 
     # Ideal multi-family catalog fitting current runtime resources (used when offline or as recommendations)
     ideal_candidates: List[str] = []
