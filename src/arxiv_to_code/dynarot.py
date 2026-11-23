@@ -674,7 +674,7 @@ def is_synthesis_chat_model(tag: str) -> bool:
 
 
 def model_capability_score(tag: str) -> int:
-    """Capability ranking matching QuorumRAG AutoFusionRouter::model_capability_score, favoring official schema-reliable weights."""
+    """Capability ranking matching QuorumRAG AutoFusionRouter::model_capability_score, differentiating 9B > 8B > 7B and favoring official schema-reliable weights."""
     low = tag.strip().lower()
     if "70b" in low:
         base = 700
@@ -684,8 +684,13 @@ def model_capability_score(tag: str) -> int:
         base = 260
     elif "14b" in low or "13b" in low or "12b" in low:
         base = 140
-    elif "9b" in low or "8b" in low or "7b" in low or low.startswith("glm4"):
-        base = 80
+    elif "9b" in low or low.startswith("glm4"):
+        base = 95
+    elif "8b" in low:
+        base = 85
+    elif "7b" in low:
+        # Native 7B instruct/code models (e.g. qwen2.5:7b) outrank 7B distilled reasoning models in strict-JSON mode
+        base = 72 if "deepseek-r1" in low else 80
     elif "4b" in low or "3b" in low:
         base = 35
     elif "1.5b" in low or "2b" in low:

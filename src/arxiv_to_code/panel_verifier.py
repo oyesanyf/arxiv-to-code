@@ -307,17 +307,8 @@ def assemble_verification_panel(
         base_tags = list(ideal_candidates)
         installed_set = {m.lower() for m in eligible_installed}
     elif eligible_installed:
-        # Order installed models: put any installed GLM/DeepSeek/Qwen/Gemma matching ideal order first
-        ordered: List[str] = []
-        for ideal in ideal_candidates:
-            il = ideal.lower()
-            for inst in eligible_installed:
-                if inst not in ordered and (inst.lower() == il or inst.lower().startswith(f"{il}:")):
-                    ordered.append(inst)
-        for inst in eligible_installed:
-            if inst not in ordered:
-                ordered.append(inst)
-        base_tags = ordered
+        # Order installed models strictly by GPU-VRAM residency + capability score (e.g. glm4:9b > qwen2.5:7b > deepseek-r1:7b)
+        base_tags = list(eligible_installed)
         installed_set = {m.lower() for m in eligible_installed}
     else:
         base_tags = ideal_candidates or [dynarot_decision.primary_model]
@@ -384,13 +375,15 @@ def assemble_verification_panel(
             )
             var_idx += 1
 
-    # Select Judge model (prefer DeepSeek-R1 / GLM / Qwen among installed or base_tags, matching ModelFusion mod.rs)
-    judge_model = base_tags[0]
-    for pref_kw in ("deepseek", "glm", "qwen", "gemma"):
-        hit = next((t for t in base_tags if pref_kw in t.lower()), None)
-        if hit is not None:
-            judge_model = hit
-            break
+    # Select Judge model: pick the highest-capability official model in base_tags
+    # (so 9B glm4:9b or 14B+ models cleanly outrank smaller 7B distilled models as Judge).
+    judge_model = max(
+        base_tags,
+        key=lambda t: (
+            model_capability_score(t),
+            1 if any(k in t.lower() for k in ("glm", "qwen")) else 0,
+        ),
+    )
 
     batch_size = calculate_panel_batch_size(len(members), hw)
     meta = {

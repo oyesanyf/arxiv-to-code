@@ -146,7 +146,23 @@ def test_panel_assembly_multi_model_multi_sample_and_think_parsing() -> None:
     assert all("nimble" not in m.model_tag.lower() for m in members)
     assert {m.model_tag for m in members[:2]} == {"glm4:9b", "qwen2.5:7b"}
     assert meta["batch_size"] == 1
-    assert judge_model in ("glm4:9b", "qwen2.5:7b")
+    assert judge_model == "glm4:9b"
+
+    # Verify 9B glm4:9b + qwen2.5:7b outrank smaller 7B deepseek-r1:7b and abliterated fine-tunes
+    ranked_members, _, ranked_judge, _ = assemble_verification_panel(
+        hw=hw,
+        installed_models=[
+            "huihui_ai/foundation-sec-abliterated:8b",
+            "deepseek-r1:7b",
+            "qwen2.5:7b",
+            "glm4:9b",
+        ],
+        dynarot_decision=decision,
+        requested_panel_size=2,
+        panel_mode="multi-model",
+    )
+    assert [m.model_tag for m in ranked_members] == ["glm4:9b", "qwen2.5:7b"]
+    assert ranked_judge == "glm4:9b"
 
     # Multi-sample mode: 3 diverse temperature/persona samples of top model
     ms_members, _, _, ms_meta = assemble_verification_panel(
