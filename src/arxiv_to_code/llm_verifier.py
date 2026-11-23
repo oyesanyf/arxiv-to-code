@@ -23,13 +23,19 @@ Combines two fail-closed verification layers:
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
 import os
+import platform
 import re
+import subprocess
+import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .dynarot import (
@@ -137,13 +143,275 @@ class CodeVerificationReport:
 
 
 # =============================================================================
-# Layer 1: Deterministic Static AST, Security Invariants & Runtime Verification
+# Layer 1: Deterministic Static Linters (AST + Ruff), Pytest & Runtime Gate
 # =============================================================================
+
+def run_static_code_linters(source_code: str) -> Dict[str, Any]:
+    """
+    Runs multi-layer static linting over generated Python code:
+      1. Built-in zero-dependency strict AST linter:
+         - Unused imports (`AST-F401`)
+         - Duplicate dictionary literal keys (`AST-F601`)
+         - Bare `except:` clauses (`AST-E722`)
+         - Mutable default arguments like `def f(x=[])` (`AST-B006`)
+         - Cache-key length-collision anti-pattern (`AST-BUG001`: `(payload_corpus, len(indicators))`)
+      2. External `ruff check --select E,F,W,B --ignore E501` subprocess linter when `ruff` is installed.
+    """
+    issues: List[Dict[str, Any]] = []
+    engines_used: List[str] = ["builtin_ast_linter"]
+
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError as exc:
+        return {
+            "linter_passed": False,
+            "linter_engines": engines_used,
+            "issue_count": 1,
+            "issues": [
+                {
+                    "engine": "builtin_ast_linter",
+                    "code": "E999",
+                    "line": exc.lineno or 1,
+                    "message": f"SyntaxError: {exc.msg}",
+                }
+            ],
+        }
+
+    # 1a. Collect imported names vs referenced names (skipping `from __future__ import ...`)
+    imported: Dict[str, int] = {}
+    referenced: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                imported[bound] = node.lineno
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "__future__":
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                bound = alias.asname or alias.name
+                imported[bound] = node.lineno
+        elif isinstance(node, ast.Name):
+            referenced.add(node.id)
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            referenced.add(node.value.id)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            # Keep forward-reference string annotations (e.g. "DelegationScope")
+            for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", node.value):
+                referenced.add(tok)
+
+        # 1b. Bare except
+        if isinstance(node, ast.ExceptHandler) and node.type is None:
+            issues.append(
+                {
+                    "engine": "builtin_ast_linter",
+                    "code": "AST-E722",
+                    "line": node.lineno,
+                    "message": "Bare `except:` clause detected; catch a specific exception type.",
+                }
+            )
+
+        # 1c. Mutable default arguments
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            all_defaults = list(node.args.defaults) + [d for d in node.args.kw_defaults if d is not None]
+            for dflt in all_defaults:
+                if isinstance(dflt, (ast.List, ast.Dict, ast.Set)):
+                    issues.append(
+                        {
+                            "engine": "builtin_ast_linter",
+                            "code": "AST-B006",
+                            "line": dflt.lineno,
+                            "message": f"Mutable default argument in function `{node.name}`.",
+                        }
+                    )
+
+        # 1d. Duplicate literal dictionary keys
+        if isinstance(node, ast.Dict):
+            seen_keys: set[Any] = set()
+            for k in node.keys:
+                if isinstance(k, ast.Constant):
+                    key_repr = (type(k.value).__name__, k.value)
+                    if key_repr in seen_keys:
+                        issues.append(
+                            {
+                                "engine": "builtin_ast_linter",
+                                "code": "AST-F601",
+                                "line": k.lineno,
+                                "message": f"Duplicate dictionary literal key `{k.value!r}`.",
+                            }
+                        )
+                    seen_keys.add(key_repr)
+
+    for imp_name, lineno in imported.items():
+        if imp_name not in referenced:
+            issues.append(
+                {
+                    "engine": "builtin_ast_linter",
+                    "code": "AST-F401",
+                    "line": lineno,
+                    "message": f"Unused import `{imp_name}`.",
+                }
+            )
+
+    # 1e. Detect cache-key length collision anti-pattern `(payload_corpus, len(indicators))`
+    if re.search(r"cache_key\s*=\s*\(\s*payload_corpus\s*,\s*len\s*\(\s*indicators\s*\)\s*\)", source_code):
+        issues.append(
+            {
+                "engine": "builtin_ast_linter",
+                "code": "AST-BUG001",
+                "line": 1,
+                "message": "Cache key uses `len(indicators)` instead of `tuple(indicators)`, causing stale collisions.",
+            }
+        )
+
+    # 2. Run external `ruff check` if installed
+    if importlib.util.find_spec("ruff") is not None:
+        engines_used.append("ruff")
+        creationflags = 0x08000000 if platform.system() == "Windows" else 0
+        with tempfile.TemporaryDirectory(prefix="arxiv_lint_") as tmpdir:
+            tmp_py = Path(tmpdir) / "generated_module.py"
+            tmp_py.write_text(source_code, encoding="utf-8")
+            try:
+                proc = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "ruff",
+                        "check",
+                        "--output-format",
+                        "json",
+                        "--select",
+                        "E,F,W,B",
+                        "--ignore",
+                        "E501",
+                        str(tmp_py),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=15,
+                    creationflags=creationflags,
+                )
+                raw_out = (proc.stdout or "").strip()
+                if raw_out:
+                    ruff_items = json.loads(raw_out)
+                    if isinstance(ruff_items, list):
+                        for item in ruff_items[:20]:
+                            loc = item.get("location") or {}
+                            issues.append(
+                                {
+                                    "engine": "ruff",
+                                    "code": str(item.get("code", "RUFF")),
+                                    "line": int(loc.get("row", 1)),
+                                    "message": str(item.get("message", "")),
+                                }
+                            )
+            except Exception as exc:
+                issues.append(
+                    {
+                        "engine": "ruff",
+                        "code": "RUFF-EXEC",
+                        "line": 1,
+                        "message": f"Ruff execution warning: {type(exc).__name__}: {str(exc)[:140]}",
+                    }
+                )
+
+    return {
+        "linter_passed": len(issues) == 0,
+        "linter_engines": engines_used,
+        "issue_count": len(issues),
+        "issues": issues,
+    }
+
+
+def run_generated_code_pytest(
+    source_code: str,
+    arxiv_id: str = "custom",
+    timeout_sec: int = 20,
+) -> Dict[str, Any]:
+    """
+    Executes real `python -m pytest` in an isolated temporary directory directly against
+    the generated Python module (with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` and isolated `--basetemp`).
+    """
+    has_discoverable_tests = bool(
+        re.search(r"^\s*def\s+test_", source_code, flags=re.MULTILINE)
+        or re.search(r"^\s*class\s+Test[A-Za-z0-9_]*", source_code, flags=re.MULTILINE)
+    )
+    if not has_discoverable_tests:
+        return {
+            "pytest_executed": False,
+            "pytest_passed": True,
+            "exit_code": 5,
+            "summary": "No pytest test_* functions or Test* classes declared in custom snippet.",
+        }
+
+    if importlib.util.find_spec("pytest") is None:
+        return {
+            "pytest_executed": False,
+            "pytest_passed": True,
+            "exit_code": -1,
+            "summary": "pytest package not installed; relied on embedded run_deterministic_benchmark().",
+        }
+
+    slug = re.sub(r"[^A-Za-z0-9_]+", "_", arxiv_id or "custom")
+    creationflags = 0x08000000 if platform.system() == "Windows" else 0
+    env = dict(os.environ)
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+
+    with tempfile.TemporaryDirectory(prefix="arxiv_pytest_") as tmpdir:
+        tmp_root = Path(tmpdir)
+        test_file = tmp_root / f"test_generated_{slug}.py"
+        basetemp = tmp_root / "basetemp"
+        test_file.write_text(source_code, encoding="utf-8")
+        try:
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "-q",
+                    "--no-header",
+                    "-p",
+                    "no:cacheprovider",
+                    "--basetemp",
+                    str(basetemp),
+                    str(test_file),
+                ],
+                cwd=str(tmp_root),
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_sec,
+                creationflags=creationflags,
+            )
+            combined = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+            last_line = [ln.strip() for ln in combined.splitlines() if ln.strip()]
+            summary_line = last_line[-1] if last_line else f"exit_code={proc.returncode}"
+            return {
+                "pytest_executed": True,
+                "pytest_passed": proc.returncode == 0,
+                "exit_code": proc.returncode,
+                "summary": summary_line[:240],
+            }
+        except Exception as exc:
+            return {
+                "pytest_executed": True,
+                "pytest_passed": False,
+                "exit_code": -2,
+                "summary": f"pytest execution error: {type(exc).__name__}: {str(exc)[:180]}",
+            }
+
 
 def run_deterministic_code_verification(
     source_code: str,
     arxiv_id: str = "custom",
     benchmark_iterations: int = 40,
+    run_pytest_subprocess: bool = True,
 ) -> Dict[str, Any]:
     """
     Performs fail-closed static AST inspection, security invariant checks, anti-mock
@@ -261,7 +529,21 @@ def run_deterministic_code_verification(
             }
         )
 
-    # Execute deterministic runtime benchmark & embedded tests
+    # Run static linters (Built-In AST Linter + Ruff if installed)
+    linter_report = run_static_code_linters(source_code)
+    linter_passed = bool(linter_report["linter_passed"])
+    if not linter_passed:
+        for li in linter_report["issues"][:8]:
+            findings.append(
+                {
+                    "severity": "HIGH" if str(li.get("code", "")).startswith(("E9", "F8", "AST-BUG")) else "MEDIUM",
+                    "category": "lint",
+                    "message": f"[{li['engine']}:{li['code']} L{li['line']}] {li['message']}",
+                    "recommendation": "Resolve static linter violation before shipping generated code.",
+                }
+            )
+
+    # Execute deterministic runtime benchmark & embedded tests + real pytest subprocess
     clean_id = normalize_arxiv_id(arxiv_id) or "custom"
     if ast_syntax_valid and zero_dangerous_calls:
         metrics = evaluate_python_candidate(
@@ -275,13 +557,40 @@ def run_deterministic_code_verification(
         runtime_fitness = metrics.total_fitness
         execution_time_us = metrics.execution_time_us
         peak_memory_kib = metrics.peak_memory_kib
+        pytest_report = (
+            run_generated_code_pytest(source_code=source_code, arxiv_id=clean_id)
+            if run_pytest_subprocess
+            else {
+                "pytest_executed": False,
+                "pytest_passed": True,
+                "exit_code": 0,
+                "summary": "Skipped subprocess pytest by caller.",
+            }
+        )
     else:
         runtime_error = "Skipped runtime execution due to syntax error or dangerous AST call."
         tests_passed = 0
-        tests_total = 4
+        tests_total = 7
         runtime_fitness = 0.0
         execution_time_us = 0.0
         peak_memory_kib = 0.0
+        pytest_report = {
+            "pytest_executed": False,
+            "pytest_passed": False,
+            "exit_code": 2,
+            "summary": "Skipped pytest due to syntax error or dangerous AST call.",
+        }
+
+    pytest_passed = bool(pytest_report["pytest_passed"])
+    if not pytest_passed:
+        findings.append(
+            {
+                "severity": "CRITICAL",
+                "category": "correctness",
+                "message": f"Subprocess pytest failed on generated module: {pytest_report['summary']}",
+                "recommendation": "Fix failing pytest test cases in generated module.",
+            }
+        )
 
     if runtime_error:
         findings.append(
@@ -302,22 +611,26 @@ def run_deterministic_code_verification(
             }
         )
 
-    # Deterministic 0-100 composite score
+    # Deterministic 0-100 composite score (includes linter + real pytest pass)
     score = 0.0
     if ast_syntax_valid:
-        score += 20.0
+        score += 15.0
     if zero_dangerous_calls:
         score += 20.0
     if zero_mock_indicators:
         score += 10.0
+    if linter_passed:
+        score += 10.0
     if has_evolve_block:
         score += 10.0
     if constant_time_hmac_used:
-        score += 10.0
+        score += 5.0
     if meet_semilattice_present:
         score += 5.0
     if tests_total > 0 and runtime_error is None:
-        score += 25.0 * (tests_passed / float(tests_total))
+        score += 15.0 * (tests_passed / float(tests_total))
+    if pytest_passed and runtime_error is None:
+        score += 10.0
 
     return {
         "ast_syntax_valid": ast_syntax_valid,
@@ -328,6 +641,14 @@ def run_deterministic_code_verification(
         "dangerous_calls_found": sorted(set(dangerous_calls_found)),
         "zero_mock_single_token_indicators": zero_mock_indicators,
         "mock_indicators_found": mock_indicators_found,
+        "linter_passed": linter_passed,
+        "linter_engines": linter_report["linter_engines"],
+        "linter_issue_count": linter_report["issue_count"],
+        "linter_issues": linter_report["issues"],
+        "pytest_executed": bool(pytest_report["pytest_executed"]),
+        "pytest_passed": pytest_passed,
+        "pytest_exit_code": int(pytest_report["exit_code"]),
+        "pytest_summary": str(pytest_report["summary"]),
         "runtime_tests_passed": tests_passed,
         "runtime_tests_total": tests_total,
         "runtime_fitness_score": runtime_fitness,
@@ -441,6 +762,17 @@ def parse_llm_verification_json(raw_text: str) -> Optional[Dict[str, Any]]:
                 parsed = None
 
     if parsed is None:
+        return None
+
+    # Reject empty/sparse JSON objects (e.g., `{}`) lacking all required verification keys
+    required_signal_keys = (
+        "verdict",
+        "paper_fidelity_score",
+        "correctness_score",
+        "security_score",
+        "summary",
+    )
+    if not any(k in parsed and parsed.get(k) not in (None, "") for k in required_signal_keys):
         return None
 
     verdict_raw = str(parsed.get("verdict", "WARN")).strip().upper()
@@ -782,6 +1114,7 @@ def verify_generated_python_code(
     det_hard_fail = (
         (not det_checks["ast_syntax_valid"])
         or (not det_checks["zero_dangerous_calls"])
+        or (not det_checks.get("pytest_passed", True))
         or (det_checks["runtime_error"] is not None)
         or (det_checks["runtime_tests_passed"] < det_checks["runtime_tests_total"])
     )

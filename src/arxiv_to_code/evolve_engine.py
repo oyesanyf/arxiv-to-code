@@ -247,7 +247,9 @@ def evaluate_python_candidate(
                 ast_fingerprint=ast_fp,
                 error=f"Benchmark Execution Error: {exc}",
             )
-        elapsed_us = ((time.perf_counter() - t0) * 1_000_000.0) / max(1, benchmark_iterations)
+        outer_elapsed_us = ((time.perf_counter() - t0) * 1_000_000.0) / max(1, benchmark_iterations)
+        kernel_us = float(bench_result.get("avg_iteration_us") or 0.0)
+        elapsed_us = kernel_us if kernel_us > 0.0 else outer_elapsed_us
         _, peak_bytes = tracemalloc.get_traced_memory()
         tracemalloc.stop()
         trial_times_us.append(elapsed_us)
@@ -535,8 +537,8 @@ SHINKA_STRUCTURAL_BREAKTHROUGHS: List[Tuple[str, str, str]] = [
     ),
     (
         "shinka_structural_memoized_lru_signature_kernel",
-        "Synthesized bounded inline dict cache over (payload_corpus, id(indicators)) for O(1) repeated stream evaluation.",
-        '''_SHINKA_INLINE_CACHE: Dict[Tuple[str, int], Tuple[Tuple[str, ...], float]] = {}
+        "Synthesized bounded inline dict cache keyed by (payload_corpus, tuple(indicators)) for collision-free O(1) repeated stream evaluation.",
+        '''_SHINKA_INLINE_CACHE: Dict[Tuple[str, Tuple[str, ...]], Tuple[Tuple[str, ...], float]] = {}
 
 def scan_and_score_payload(
     payload_corpus: str,
@@ -545,15 +547,16 @@ def scan_and_score_payload(
     alpha: float = 0.01,
 ) -> Tuple[Tuple[str, ...], float, float, bool]:
     """
-    ShinkaEvolve Structural Discovery 4: O(1) Bounded Signature Memoization & Submartingale Update.
+    ShinkaEvolve Structural Discovery 4: Collision-Free O(1) Bounded Signature Memoization.
     """
-    cache_key = (payload_corpus, len(indicators))
+    ind_key = indicators if isinstance(indicators, tuple) else tuple(indicators)
+    cache_key = (payload_corpus, ind_key)
     cached = _SHINKA_INLINE_CACHE.get(cache_key)
     if cached is not None:
         matched_tuple, nonconformity = cached
     else:
         corpus_lc = payload_corpus.lower()
-        matched_tuple = tuple(pat for pat in indicators if pat in corpus_lc)
+        matched_tuple = tuple(pat for pat in ind_key if pat in corpus_lc)
         if matched_tuple:
             nonconformity = 1.0 if len(matched_tuple) > 1 else 0.75
         else:
@@ -1095,8 +1098,8 @@ def run_combined_shinka_openevolve(
 
                 lock = threading.Lock()
 
-                def _shinka_worker() -> List[EvolutionCandidate]:
-                    start_cand = shinka.archive[0] if shinka.archive else current_seed
+                def _shinka_worker(_seed: EvolutionCandidate = current_seed) -> List[EvolutionCandidate]:
+                    start_cand = shinka.archive[0] if shinka.archive else _seed
                     return shinka.run_discovery(
                         seed_candidate=start_cand,
                         generations=par_gens,
@@ -1116,7 +1119,7 @@ def run_combined_shinka_openevolve(
                     f_shinka = pool.submit(_shinka_worker)
                     f_open = pool.submit(_openevolve_worker)
                     s_res = f_shinka.result()
-                    o_res = f_open.result()
+                    f_open.result()
 
                 # Bidirectional Cross-Pollination Exchange
                 with lock:

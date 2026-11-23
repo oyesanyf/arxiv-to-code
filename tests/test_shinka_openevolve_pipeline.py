@@ -45,7 +45,7 @@ def test_sequential_two_stage_shinka_to_openevolve(tmp_path: Path) -> None:
         elites_dir=str(tmp_path / "seq_elites"),
     )
     assert report["evolve_mode"] == "sequential"
-    assert report["champion_metrics"]["tests_passed"] == 4
+    assert report["champion_metrics"]["tests_passed"] == 7
     assert report["champion_metrics"]["total_fitness"] >= report["baseline_seed_metrics"]["total_fitness"]
     assert Path(report["champion_file_path"]).exists()
     assert len(report["shinkaevolve_summary"]["meta_scratchpad_stepping_stones"]) >= 1
@@ -67,7 +67,7 @@ def test_parallel_cross_pollinating_ensemble(tmp_path: Path) -> None:
         elites_dir=str(tmp_path / "par_elites"),
     )
     assert report["evolve_mode"] == "parallel"
-    assert report["champion_metrics"]["tests_passed"] == 4
+    assert report["champion_metrics"]["tests_passed"] == 7
     assert len(report["cross_pollination_events"]) >= 2
     directions = [e["direction"] for e in report["cross_pollination_events"]]
     assert any("OpenEvolve -> ShinkaEvolve" in d for d in directions)

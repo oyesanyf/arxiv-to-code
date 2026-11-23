@@ -12,11 +12,37 @@ ArXiv-to-Code Universal MCP Server (stdio JSON-RPC 2.0):
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+from .dream_rsi_engine import run_dream_rsi_rl_optimization as _run_dream_rsi_rl_impl
+from .dynarot import DynaRotModelRouter
+from .evolve_engine import run_combined_shinka_openevolve
+from .langextract_engine import (
+    CODEBASE_IMPLEMENTED_PAPERS,
+    arxiv,
+    audit_defense_coverage_multi_target,
+    compute_article_rank,
+    extract_grounded_breakouts,
+    extract_text_from_document_path,
+    fetch_paper_by_id,
+    generate_interactive_html,
+    lx,
+    normalize_arxiv_id,
+    search_and_rank_articles,
+)
+from .llm_verifier import verify_generated_python_code as _verify_generated_python_code_impl
+from .ollama_provisioner import (
+    dynamically_provision_ollama_and_models as _dynamically_provision_ollama_and_models_impl,
+    ensure_models_for_pipeline as _ensure_models_for_pipeline_impl,
+)
+from .panel_verifier import run_model_panel_verification as _run_model_panel_verification_impl
+from .python_code_generator import synthesize_production_python_code
+from .swarm import run_langgraph_research_swarm
 
 # Ensure all logging goes strictly to stderr so MCP stdio JSON-RPC on stdout is never polluted
 logging.basicConfig(stream=sys.stderr, level=logging.WARNING, force=True)
@@ -65,31 +91,6 @@ class _LazyMCPServerRegistry:
 
 
 _MCPServerClass = _LazyMCPServerRegistry
-
-from .dream_rsi_engine import run_dream_rsi_rl_optimization as _run_dream_rsi_rl_impl
-from .dynarot import DynaRotModelRouter
-from .evolve_engine import run_combined_shinka_openevolve
-from .langextract_engine import (
-    CODEBASE_IMPLEMENTED_PAPERS,
-    arxiv,
-    audit_defense_coverage_multi_target,
-    compute_article_rank,
-    extract_grounded_breakouts,
-    extract_text_from_document_path,
-    fetch_paper_by_id,
-    generate_interactive_html,
-    lx,
-    normalize_arxiv_id,
-    search_and_rank_articles,
-)
-from .llm_verifier import verify_generated_python_code as _verify_generated_python_code_impl
-from .ollama_provisioner import (
-    dynamically_provision_ollama_and_models as _dynamically_provision_ollama_and_models_impl,
-    ensure_models_for_pipeline as _ensure_models_for_pipeline_impl,
-)
-from .panel_verifier import run_model_panel_verification as _run_model_panel_verification_impl
-from .python_code_generator import synthesize_production_python_code
-from .swarm import run_langgraph_research_swarm
 
 server = _MCPServerClass("arxiv-to-code")
 
@@ -668,9 +669,7 @@ async def optimize_code_with_dream_rsi_rl(
         return json.dumps({"error": str(exc), "arxiv_id": arxiv_id}, indent=2)
 
 
-def build_mcp_arg_parser() -> "argparse.ArgumentParser":
-    import argparse
-
+def build_mcp_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="arxiv-to-code-mcp",
         formatter_class=argparse.RawDescriptionHelpFormatter,

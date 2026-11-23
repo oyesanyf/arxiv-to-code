@@ -21,7 +21,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, List, Tuple
 
 from arxiv_to_code.cli import main as cli_main, normalize_cli_argv
 from arxiv_to_code.dynarot import DynaRotModelRouter, _OLLAMA_PROBE_CACHE

@@ -602,7 +602,7 @@ def dynamically_provision_ollama_and_models(
     )
 
     pull_results: List[Dict[str, Any]] = []
-    for tag, plan in zip(target_models, plans):
+    for tag, plan in zip(target_models, plans, strict=False):
         if is_model_installed(tag, installed_before):
             pull_results.append(
                 {

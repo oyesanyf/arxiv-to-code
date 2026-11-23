@@ -28,5 +28,6 @@ env/
 venv/
 target/
 generated/
+shared_worlds/
 .arxiv_to_code_elites/
 *.html

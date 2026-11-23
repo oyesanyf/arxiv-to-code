@@ -20,7 +20,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -37,7 +37,6 @@ from .langextract_engine import (
     extract_text_from_document_path,
     fetch_paper_by_id,
     generate_interactive_html,
-    normalize_arxiv_id,
     search_and_rank_articles,
 )
 from .llm_verifier import verify_generated_python_code
@@ -272,7 +271,7 @@ def run_self_test() -> bool:
     assert "# EVOLVE-BLOCK-START" in py_src and "# EVOLVE-BLOCK-END" in py_src
     metrics = evaluate_python_candidate(py_src, candidate_id="test-2608-15888")
     assert metrics.error is None, f"Generated Python code failed evaluation: {metrics.error}"
-    assert metrics.tests_passed == metrics.tests_total == 4
+    assert metrics.tests_passed == metrics.tests_total == 7
     print(
         f"  [PASS] Generated Python module passed {metrics.tests_passed}/{metrics.tests_total} tests "
         f"(Fitness: {metrics.total_fitness}/100, Speed: {metrics.execution_time_us} us, Memory: {metrics.peak_memory_kib} KiB)"
@@ -1234,6 +1233,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 )
                 print(
                     f"  Deterministic Gate    : AST={det_c['ast_syntax_valid']} | "
+                    f"Lint={'PASS' if det_c.get('linter_passed') else 'FAIL'}({','.join(det_c.get('linter_engines', []))}) | "
+                    f"Pytest={'PASS' if det_c.get('pytest_passed') else 'FAIL'} | "
                     f"Tests={det_c['runtime_tests_passed']}/{det_c['runtime_tests_total']} | "
                     f"HMAC={det_c['constant_time_hmac_used']} | SafeCalls={det_c['zero_dangerous_calls']}",
                     flush=True,

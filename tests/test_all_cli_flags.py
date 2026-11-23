@@ -30,7 +30,7 @@ import json
 from pathlib import Path
 import pytest
 
-from arxiv_to_code.cli import build_arg_parser, main as cli_main, normalize_cli_argv
+from arxiv_to_code.cli import main as cli_main, normalize_cli_argv
 
 
 def test_flag_01_help_and_version(capsys) -> None:
@@ -289,7 +289,9 @@ def test_flag_12_verify_llm_and_aliases(tmp_path: Path, capsys) -> None:
     assert len(reports) == 1
     ver_data = json.loads(reports[0].read_text(encoding="utf-8"))
     assert ver_data["verdict"] in ("PASS", "WARN", "FAIL")
-    assert ver_data["deterministic_checks"]["runtime_tests_passed"] == 4
+    assert ver_data["deterministic_checks"]["runtime_tests_passed"] == 7
+    assert ver_data["deterministic_checks"]["linter_passed"] is True
+    assert ver_data["deterministic_checks"]["pytest_passed"] is True
     assert ver_data["deterministic_checks"]["deterministic_score"] == 100.0
     index_text = (out_dir / "INDEX.md").read_text(encoding="utf-8")
     assert "Verification" in index_text

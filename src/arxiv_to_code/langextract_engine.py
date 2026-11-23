@@ -29,12 +29,12 @@ import os
 import re
 import socket
 import urllib.error
+import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
-import concurrent.futures
 
 socket.setdefaulttimeout(2.5)
 
@@ -722,9 +722,6 @@ def extract_code_repo_url(text: str, arxiv_id: str = "") -> Tuple[bool, str]:
             return True, clean_url
     return False, ""
 
-
-import urllib.parse
-import xml.etree.ElementTree as ET
 
 _ARXIV_SEARCH_CACHE: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
 

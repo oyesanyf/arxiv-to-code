@@ -26,5 +26,5 @@ def test_synthesize_production_python_code_and_execute(tmp_path: Path) -> None:
 
         metrics = evaluate_python_candidate(py_code, candidate_id=f"test-{arxiv_id}")
         assert metrics.error is None
-        assert metrics.tests_passed == metrics.tests_total == 4
+        assert metrics.tests_passed == metrics.tests_total == 7
         assert metrics.total_fitness >= 70.0

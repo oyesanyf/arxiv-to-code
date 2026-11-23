@@ -921,7 +921,7 @@ def dominates(a: List[float], b: List[float], directions: List[str]) -> bool:
     """
     better_or_equal = True
     strictly_better = False
-    for val_a, val_b, direction in zip(a, b, directions):
+    for val_a, val_b, direction in zip(a, b, directions, strict=False):
         diff = val_a - val_b
         if abs(diff) <= EPS:
             continue
@@ -1295,7 +1295,7 @@ class DynaRotModelRouter:
                 explicit_models=explicit_models,
                 prefer_vram_resident=prefer_vram_resident,
             )
-            for tag, plan in zip(dyn_tags, dyn_plans):
+            for tag, plan in zip(dyn_tags, dyn_plans, strict=False):
                 target_models.append(tag)
                 target_plans[tag] = plan
         else:

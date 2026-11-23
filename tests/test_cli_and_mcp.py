@@ -155,7 +155,7 @@ def test_all_8_mcp_tools(tmp_path: Path) -> None:
     )
     gen_data = json.loads(gen_raw)
     assert gen_data["generated_python_code"]["language"] == "python"
-    assert gen_data["evolution_report"]["champion_metrics"]["tests_passed"] == 4
+    assert gen_data["evolution_report"]["champion_metrics"]["tests_passed"] == 7
 
     # Tool 6: evolve_python_code
     evo_raw = asyncio.run(
@@ -169,7 +169,7 @@ def test_all_8_mcp_tools(tmp_path: Path) -> None:
     )
     evo_data = json.loads(evo_raw)
     assert evo_data["evolve_mode"] == "parallel"
-    assert evo_data["champion_metrics"]["tests_passed"] == 4
+    assert evo_data["champion_metrics"]["tests_passed"] == 7
 
     # Tool 7: audit_defense_coverage
     aud_raw = asyncio.run(audit_defense_coverage(arxiv_id="2603.02277"))
@@ -187,7 +187,7 @@ def test_all_8_mcp_tools(tmp_path: Path) -> None:
     ver_raw = asyncio.run(verify_generated_python_code(arxiv_id="2608.15888", enable_llm=False))
     ver_data = json.loads(ver_raw)
     assert ver_data["verdict"] == "PASS"
-    assert ver_data["deterministic_checks"]["runtime_tests_passed"] == 4
+    assert ver_data["deterministic_checks"]["runtime_tests_passed"] == 7
 
     # Tool 10: optimize_code_with_dream_rsi_rl
     rl_raw = asyncio.run(
@@ -204,4 +204,4 @@ def test_all_8_mcp_tools(tmp_path: Path) -> None:
         "native_dream_rsi_replay_world_model",
         "official_google_research_dream_rsi",
     )
-    assert rl_data["champion_metrics"]["tests_passed"] == 4
+    assert rl_data["champion_metrics"]["tests_passed"] == 7

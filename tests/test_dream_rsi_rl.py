@@ -240,7 +240,7 @@ def test_cli_rl_flags_aliases_workspace_and_mcp_tool(tmp_path: Path, capsys) -> 
 
     rep = json.loads(rl_reports[0].read_text(encoding="utf-8"))
     assert rep["replay_world_pool_summary"]["final_worlds_count"] == 2
-    assert rep["champion_metrics"]["tests_passed"] == 4
+    assert rep["champion_metrics"]["tests_passed"] == 7
     index_md = (out_dir / "INDEX.md").read_text(encoding="utf-8")
     assert "Dream-RSI RL" in index_md
 
@@ -270,5 +270,5 @@ def test_cli_rl_flags_aliases_workspace_and_mcp_tool(tmp_path: Path, capsys) -> 
             )
         )
     )
-    assert mcp_res["champion_metrics"]["tests_passed"] == 4
+    assert mcp_res["champion_metrics"]["tests_passed"] == 7
     assert "empirical_benchmark_95ci" in mcp_res

@@ -24,6 +24,8 @@ from arxiv_to_code.langextract_engine import extract_grounded_breakouts, fetch_p
 from arxiv_to_code.llm_verifier import (
     parse_llm_verification_json,
     run_deterministic_code_verification,
+    run_generated_code_pytest,
+    run_static_code_linters,
     verify_generated_python_code,
 )
 from arxiv_to_code.python_code_generator import synthesize_production_python_code
@@ -102,8 +104,47 @@ def test_deterministic_verification_passes_valid_synthesized_code() -> None:
     assert det["meet_semilattice_present"] is True
     assert det["zero_dangerous_calls"] is True
     assert det["zero_mock_single_token_indicators"] is True
-    assert det["runtime_tests_passed"] == det["runtime_tests_total"] == 4
+    assert det["linter_passed"] is True
+    assert det["linter_issue_count"] == 0
+    assert det["pytest_executed"] is True
+    assert det["pytest_passed"] is True
+    assert det["pytest_exit_code"] == 0
+    assert det["runtime_tests_passed"] == det["runtime_tests_total"] == 7
     assert det["deterministic_score"] == 100.0
+
+
+def test_static_linters_and_subprocess_pytest_catch_real_bugs() -> None:
+    # 1. Catch unused import, bare except, mutable default arg, and stale cache key collision bug
+    buggy_code = (
+        "import math\n"
+        "def bad_fn(items=[]):\n"
+        "    cache_key = (payload_corpus, len(indicators))\n"
+        "    try:\n"
+        "        return cache_key, items\n"
+        "    except:\n"
+        "        return None\n"
+    )
+    lint = run_static_code_linters(buggy_code)
+    assert lint["linter_passed"] is False
+    codes = {i["code"] for i in lint["issues"]}
+    assert "AST-F401" in codes
+    assert "AST-B006" in codes
+    assert "AST-E722" in codes
+    assert "AST-BUG001" in codes
+
+    # 2. Catch failing pytest test in generated module and fail closed
+    failing_test_code = (
+        "def test_broken_invariant():\n"
+        "    assert 1 == 2\n"
+    )
+    pt = run_generated_code_pytest(failing_test_code, arxiv_id="broken-test")
+    assert pt["pytest_executed"] is True
+    assert pt["pytest_passed"] is False
+    assert pt["exit_code"] != 0
+
+    # 3. Reject empty sparse `{}` LLM JSON responses so blank outputs cannot pollute panel
+    assert parse_llm_verification_json("{}") is None
+    assert parse_llm_verification_json('{"unrelated": 123}') is None
 
 
 def test_deterministic_verification_rejects_dangerous_and_mock_code() -> None:

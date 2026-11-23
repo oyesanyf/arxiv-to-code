@@ -22,9 +22,13 @@ jobs:
       - name: Install package and test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e . pytest
+          pip install -e . pytest ruff
 
-      - name: Run 9-Step Functional Self-Test Suite
+      - name: Lint Repository Source & Tests with Ruff
+        run: |
+          ruff check src tests
+
+      - name: Run 10-Step Functional Self-Test Suite
         run: |
           python arixv_to_code.py --test
 

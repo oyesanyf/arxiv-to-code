@@ -439,15 +439,19 @@ class TraceEnv:
                 batch_specs.append((nid, op_name, fam, new_block, rationale, mutated_src))
 
             # Semaphore-bounded concurrent real evaluation
-            def _eval_one(spec: Tuple[str, str, str, str, str, str]) -> Tuple[DiscoveryTreeNode, float]:
+            def _eval_one(
+                spec: Tuple[str, str, str, str, str, str],
+                _parent_id: str = parent_id,
+                _parent_depth: int = parent.depth,
+            ) -> Tuple[DiscoveryTreeNode, float]:
                 nid, op_name, fam, new_block, rationale, mutated_src = spec
                 t0 = time.perf_counter()
                 m = evaluator_fn(mutated_src, f"rl-c{cycle_index}-{nid}")
                 cost_ms = round((time.perf_counter() - t0) * 1000.0, 2)
                 node = DiscoveryTreeNode(
                     node_id=nid,
-                    parent_id=parent_id,
-                    depth=parent.depth + 1,
+                    parent_id=_parent_id,
+                    depth=_parent_depth + 1,
                     source_code=mutated_src,
                     evolve_block_code=new_block,
                     operator=op_name,

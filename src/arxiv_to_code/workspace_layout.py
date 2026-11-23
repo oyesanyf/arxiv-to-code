@@ -401,7 +401,7 @@ def write_organized_paper_artifacts(
         "| arXiv ID | Score | Title | Folder | Python Module | Evolved Champion | Dream-RSI RL | Speedup | Verification | LangExtract HTML |",
         "|:---|:---:|:---|:---|:---|:---|:---|:---:|:---:|:---|",
     ]
-    for pid, entry in sorted(
+    for _pid, entry in sorted(
         manifest["papers"].items(),
         key=lambda kv: float(kv[1].get("rank_score", 0.0)),
         reverse=True,
